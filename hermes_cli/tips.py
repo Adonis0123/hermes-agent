@@ -1,6 +1,14 @@
 """Random tips shown at CLI session start to help users discover features."""
 
+import logging
 import random
+from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+# Last custom tip per (profile home, chat slot). Process memory only: a restart
+# draws again from the full list. Built-in corpus draws are not recorded.
+_RESET_TIP_LAST: dict[tuple[str, str], str] = {}
 
 # One-liners covering slash commands, CLI flags, config, keybindings, tools, gateway, skills.
 TIPS = [
@@ -430,8 +438,93 @@ TIPS = [
 
 
 def get_random_tip(exclude_recent: int = 0) -> str:
-    """Return a random tip string."""
+    """Return a random tip string from the built-in corpus.
+
+    CLI startup and ``/clear`` call this directly. Gateway ``/new`` goes through
+    ``gateway_reset_tip`` so a user's ``display.tips`` list does not replace the
+    corpus on the terminal.
+    """
     return random.choice(TIPS)
+
+
+def normalize_display_tips(raw: Any) -> list[str]:
+    """Coerce ``display.tips`` into stripped strings. A bare string is one tip.
+
+    Blank entries and non-strings are dropped. Anything that is not a string or
+    a list is empty, which means "use the built-in corpus".
+    """
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    tips: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        text = item.strip()
+        if text:
+            tips.append(text)
+    return tips
+
+
+def choose_nonrepeating_tip(
+    tips: list[str],
+    last: Optional[str],
+    chooser: Optional[Callable[[list[str]], str]] = None,
+) -> str:
+    """Pick one tip, skipping ``last`` while another line is available."""
+    if not tips:
+        raise ValueError("tips must be non-empty")
+    pool = [tip for tip in tips if tip != last] or tips
+    return (chooser or random.choice)(pool)
+
+
+def gateway_reset_tip_slot(platform: str, chat_id: str, thread_id: Optional[str] = None) -> str:
+    """Chat identity for tip memory. A thread is its own chat."""
+    return "\n".join((platform or "", str(chat_id or ""), str(thread_id or "")))
+
+
+def clear_gateway_reset_tip_memory() -> None:
+    """Drop remembered draws. Tests use this; a process restart does the same."""
+    _RESET_TIP_LAST.clear()
+
+
+def _display_tips_raw() -> Any:
+    from hermes_cli.config import load_config_readonly
+    display = load_config_readonly().get("display") or {}
+    if not isinstance(display, dict):
+        return None
+    return display.get("tips")
+
+
+def draw_gateway_reset_tip(chat_slot: str) -> tuple[str, bool]:
+    """Return ``(body, from_user_list)`` for gateway ``/new`` and ``/reset``.
+
+    A non-empty ``display.tips`` list is the whole pool, and ``from_user_list``
+    is true so the caller prints the sentence alone. Those lines are the user's
+    own words, not product tips, so the 「提示」 label does not belong on them.
+    Empty, missing, or an unreadable shape falls back to the built-in corpus
+    with ``from_user_list`` false. The same profile+chat does not draw the same
+    custom line twice in a row.
+    """
+    try:
+        tips = normalize_display_tips(_display_tips_raw())
+    except Exception:
+        logger.debug("Could not read display.tips", exc_info=True)
+        tips = []
+    if not tips:
+        return get_random_tip(), False
+    from hermes_constants import hermes_home_key
+    slot = (hermes_home_key(), chat_slot)
+    chosen = choose_nonrepeating_tip(tips, _RESET_TIP_LAST.get(slot))
+    _RESET_TIP_LAST[slot] = chosen
+    return chosen, True
+
+
+def gateway_reset_tip(chat_slot: str) -> str:
+    """Tip body only. See ``draw_gateway_reset_tip`` for the label flag."""
+    body, _from_user_list = draw_gateway_reset_tip(chat_slot)
+    return body
 
 
 # Task-oriented example prompts for the empty composer. Kept generic — Hermes is

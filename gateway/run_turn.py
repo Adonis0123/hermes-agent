@@ -2303,23 +2303,10 @@ class GatewayTurnMixin:
             return self._format_session_info()
 
     def _format_session_info(self) -> str:
-        """Model / provider / context-length / endpoint block so users can spot bad context detection."""
+        """Model line for the reset notice. Provider and context length stay on /status."""
         from gateway.run import _resolve_gateway_model_context
         resolved = _resolve_gateway_model_context()
-        context_length = resolved.context_length
-        ctx_source = {
-            "config": "config",
-            "default": "default — set model.context_length in config to override",
-        }.get(resolved.context_source, "detected")
-        ctx_display = (
-            f"{context_length / 1_000_000:.1f}M" if context_length >= 1_000_000
-            else f"{context_length // 1_000}K" if context_length >= 1_000 else str(context_length)
-        )
-        lines = [
-            f"◆ Model: `{resolved.model}`",
-            f"◆ Provider: {resolved.provider or 'openrouter'}",
-            f"◆ Context: {ctx_display} tokens ({ctx_source})",
-        ]
+        lines = [f"◆ Model: `{resolved.model}`"]
         if (resolved.provider or "") == "moa":
             # The preset name hides who pays: the aggregator runs every tool-loop step (#112359).
             from hermes_cli.config import load_config

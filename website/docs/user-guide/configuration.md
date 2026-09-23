@@ -2258,6 +2258,17 @@ display:
   language: zh   # CLI approval prompts appear in Chinese
 ```
 
+### Session tip on `/new`
+
+`display.tips` supplies the line appended to gateway `/new` and `/reset`. A non-empty list is the whole pool: one line is drawn at random, printed on its own, and the same chat skips that line on the next reset while the gateway process stays up. An empty list keeps the built-in English tips under the `✦ Tip:` label. CLI startup and `/clear` keep the built-in corpus.
+
+```yaml
+display:
+  tips:
+    - First line
+    - Second line
+```
+
 | Mode | What you see |
 |------|-------------|
 | `off` | Silent — just the final response |

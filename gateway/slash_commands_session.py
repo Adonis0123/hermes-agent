@@ -216,8 +216,13 @@ class GatewaySessionCommandsMixin:
         except Exception:
             pass
         try:
-            from hermes_cli.tips import get_random_tip
-            _tip_line = t("gateway.reset.tip", tip=get_random_tip())
+            from hermes_cli.tips import draw_gateway_reset_tip, gateway_reset_tip_slot
+            _platform = source.platform.value if source.platform else ""
+            _slot = gateway_reset_tip_slot(_platform, source.chat_id or "", source.thread_id)
+            _tip_body, _own_words = draw_gateway_reset_tip(_slot)
+            # User lines are jokes or notes, not product tips. The 「提示」 label
+            # stays only on the built-in corpus.
+            _tip_line = f"\n{_tip_body}" if _own_words else t("gateway.reset.tip", tip=_tip_body)
         except Exception:
             _tip_line = ""
         body = f"{header}\n\n{session_info}" if session_info else header
