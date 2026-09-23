@@ -875,6 +875,10 @@ DEFAULT_CONFIG = {
         # UI language for static messages (approval prompts, some gateway slash replies); not agent
         # responses/logs/tool outputs. en, zh, ja, de, es, fr, tr, uk; unknown → en.
         "language": "en",
+        # Gateway /new and /reset tip body. Non-empty: draw one of these strings (the
+        # "✦ Tip:" label still follows language). Empty: built-in English corpus.
+        # CLI startup does not read this list.
+        "tips": [],
         # TUI busy indicator: kaomoji | emoji | unicode (braille) | ascii. `/indicator <style>`.
         "tui_status_indicator": "kaomoji",
         # Seconds between idle prompt_toolkit redraws in the classic CLI; keeps wall-clock
