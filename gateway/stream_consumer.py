@@ -238,6 +238,26 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         except Exception:
             return False
 
+    def _keeps_edit_stream_across_tools(self) -> bool:
+        """One edit stream across tools, via ``stream_is_message_for_chat``.
+
+        The method is on the class so a MagicMock does not invent it. Metadata
+        is passed when the adapter accepts it (Feishu ``plain`` / thread).
+        Adapters that only take a chat id keep the old call.
+        """
+        probe = getattr(type(self.adapter), "stream_is_message_for_chat", None)
+        if not callable(probe):
+            return False
+        try:
+            return probe(self.adapter, str(self.chat_id), self.metadata) is True
+        except TypeError:
+            try:
+                return probe(self.adapter, str(self.chat_id)) is True
+            except Exception:
+                return False
+        except Exception:
+            return False
+
     @property
     def accepts_tool_progress(self) -> bool:
         """True only when native streaming is active (gates in-stream tool progress)."""
@@ -827,9 +847,13 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
                                        and self._message_id is None)
         # Segment break finalizes so platforms needing explicit closure (DingTalk AI
         # Cards) don't leave the segment stuck loading; it closes a preamble, not the
-        # answer.
+        # answer. CardKit must stay open: sealing here closes streaming_mode and the
+        # next round has to create another card.
+        seal = tick.got_done or tick.got_segment_break
+        if tick.got_segment_break and not tick.got_done and self._keeps_edit_stream_across_tools():
+            seal = False
         tick.update_visible = await self._send_or_edit(
-            display_text, finalize=tick.got_done or tick.got_segment_break,
+            display_text, finalize=seal,
             is_turn_final=tick.got_done)
         self._last_edit_time = time.monotonic()
         # Lines stay in _tool_progress_lines for the next compose.
@@ -893,9 +917,9 @@ class GatewayStreamConsumer(StreamTransportMixin, StreamFallbackMixin, StreamThi
         return self._final_response_sent
 
     def _cumulative_transport(self) -> bool:
-        """Stream-is-the-message drafts and WeCom native: one append-only stream per turn."""
+        """One append-only stream per turn: draft stream-is-message, native, or one CardKit card."""
         stream_draft = self._stream_is_message() and self._use_draft_streaming
-        return stream_draft or self._use_native_streaming
+        return stream_draft or self._use_native_streaming or self._keeps_edit_stream_across_tools()
 
     async def _deliver_commentary(self, commentary_text: str) -> None:
         """Post commentary as its own message.  Cumulative transports keep the stream going —
