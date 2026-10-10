@@ -43,6 +43,16 @@ PARTIAL_FAILED_TURN_NOTICE = (
     "This turn did not complete. Some actions may already have run; verify their effects "
     "before resending."
 )
+# Translations of the two notices, keyed by ``agent.i18n`` language code: (full, partial).
+_FAILED_TURN_NOTICES: Dict[str, Tuple[str, str]] = {
+    "en": (FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE),
+    "zh": (
+        "这条请求没有处理。如果还需要，请再发一次。",
+        "这一轮没有完成，部分操作可能已经执行，重发前先确认结果。",
+    ),
+}
+# Every language's copy, so a boundary row written under any language reads back as one.
+_ALL_FAILED_TURN_NOTICES = frozenset(text for pair in _FAILED_TURN_NOTICES.values() for text in pair)
 # ``messages.display_kind`` of that row: display-only (stripped before every provider request),
 # so renderers show a Hermes notice and room pollers never read it as the model's reply.
 FAILED_TURN_DISPLAY_KIND = "failed_turn"
@@ -51,21 +61,32 @@ FAILED_TURN_DISPLAY_KIND = "failed_turn"
 def untyped_failed_turn_display_kind(role: Any, content: Any) -> Optional[str]:
     """``FAILED_TURN_DISPLAY_KIND`` for a boundary row persisted before the closers typed it
     (exact notice text, so a real reply quoting it stays a reply); read-side only."""
-    if role == "assistant" and isinstance(content, str) and content.strip() in (
-        FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE,
-    ):
+    if role == "assistant" and isinstance(content, str) and content.strip() in _ALL_FAILED_TURN_NOTICES:
         return FAILED_TURN_DISPLAY_KIND
     return None
 
 
-def failed_turn_notice(turn_messages: Any) -> str:
+def localized_failed_turn_notice(partial: bool = False, lang: Optional[str] = None) -> str:
+    """Boundary copy in the active language (``lang`` > ``HERMES_LANGUAGE`` > ``display.language``,
+    see :func:`agent.i18n.get_language`); English when the language has no translation."""
+    try:
+        from agent.i18n import _normalize_lang, get_language
+
+        target = _normalize_lang(lang) if lang else get_language()
+    except Exception:
+        target = "en"
+    full, partial_copy = _FAILED_TURN_NOTICES.get(target, (FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE))
+    return partial_copy if partial else full
+
+
+def failed_turn_notice(turn_messages: Any, lang: Optional[str] = None) -> str:
     """Boundary copy for a failed turn: never claim "not processed" when a tool may have run."""
     for row in turn_messages or ():
         if isinstance(row, dict) and (
             row.get("role") == "tool" or (row.get("role") == "assistant" and row.get("tool_calls"))
         ):
-            return PARTIAL_FAILED_TURN_NOTICE
-    return FAILED_TURN_NOTICE
+            return localized_failed_turn_notice(partial=True, lang=lang)
+    return localized_failed_turn_notice(partial=False, lang=lang)
 
 
 def provider_label_for(provider: Any) -> str:

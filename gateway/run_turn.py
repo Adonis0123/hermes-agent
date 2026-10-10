@@ -18,7 +18,10 @@ import threading
 import time
 from agent.i18n import t
 from agent.session_activity import format_iteration_progress
-from agent.turn_failure_copy import FAILED_TURN_DISPLAY_KIND, FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
+from agent.turn_failure_copy import (
+    FAILED_TURN_DISPLAY_KIND,
+    localized_failed_turn_notice,
+)
 from contextlib import nullcontext, suppress
 from contextvars import copy_context
 from gateway.config import Platform
@@ -1704,8 +1707,8 @@ class GatewayTurnMixin:
             or (message.get("role") == "assistant" and message.get("tool_calls"))
             for message in turn_messages
         ):
-            return PARTIAL_FAILED_TURN_NOTICE
-        return FAILED_TURN_NOTICE
+            return localized_failed_turn_notice(partial=True)
+        return localized_failed_turn_notice(partial=False)
 
     async def _hmwa_close_failed_turn(self, session_id, notice):
         """Append the gateway-owned assistant boundary iff the durable tail is an open user row.
@@ -1989,7 +1992,7 @@ class GatewayTurnMixin:
                         session_entry.session_id, self._hmwa_user_transcript_entry(event, prepared, time.time()),
                     )
                 # Tool effects are unknown after an exception.
-                await self._hmwa_close_failed_turn(session_entry.session_id, PARTIAL_FAILED_TURN_NOTICE)
+                await self._hmwa_close_failed_turn(session_entry.session_id, localized_failed_turn_notice(partial=True))
         except Exception:
             logger.debug("Failed to persist inbound user message after agent exception", exc_info=True)
         # Never expose raw exception types/messages to end users (info-leakage risk).
@@ -2018,7 +2021,7 @@ class GatewayTurnMixin:
         elif status_code == 400:
             status_hint = t("gateway.errors.hint_rejected")
         return self._hmwa_add_failed_turn_notice(
-            t("gateway.errors.generic_failed_with_hint", hint=status_hint), PARTIAL_FAILED_TURN_NOTICE,
+            t("gateway.errors.generic_failed_with_hint", hint=status_hint), localized_failed_turn_notice(partial=True),
         )
 
     def _hmwa_discard_stale_result(self, source, _quick_key, run_generation):

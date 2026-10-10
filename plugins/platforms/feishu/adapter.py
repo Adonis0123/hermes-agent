@@ -81,6 +81,7 @@ _CARDKIT_SDK_NAMES = (
     "CreateCardRequest", "CreateCardRequestBody",
     "ContentCardElementRequest", "ContentCardElementRequestBody",
     "SettingsCardRequest", "SettingsCardRequestBody",
+    "UpdateCardRequest", "UpdateCardRequestBody", "Card",
 )
 globals().update({name: None for name in _CARDKIT_SDK_NAMES})
 FEISHU_AVAILABLE = False
@@ -208,6 +209,11 @@ _FEISHU_MESSAGE_TEXT_CACHE_SIZE = 512       # LRU cap for reply-context message 
 _FEISHU_STREAM_CARD_ELEMENT_ID = "md_body"
 _FEISHU_STREAM_CARD_PREFIX = "card:"
 _FEISHU_STREAM_CARD_MAX_CHARS = 28000  # keep under CardKit element content limits
+# Markdown tables in a card split columns evenly with no width control, so a final card swaps
+# them for native ``table`` elements sized by content. CardKit renders at most 5 per card.
+_FEISHU_CARD_MAX_TABLES = 5
+_MD_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
+_MD_TABLE_CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
 
 # Overlay defaults (owner Feishu quiet path).
 _DEFAULT_STREAM_CARD_ENABLED = False
@@ -1344,6 +1350,95 @@ def _card(title: str, template: str, markdown: str, *, actions: Optional[List[Di
         "header": {"title": {"content": title, "tag": "plain_text"}, "template": template},
         "elements": elements,
     }
+
+
+def _md_table_cells(line: str) -> List[str]:
+    row = line.strip()
+    if row.startswith("|"):
+        row = row[1:]
+    if row.endswith("|") and not row.endswith("\\|"):
+        row = row[:-1]
+    return [cell.strip().replace("\\|", "|") for cell in _MD_TABLE_CELL_SPLIT_RE.split(row)]
+
+
+def _display_width(text: str) -> int:
+    return sum(2 if ord(ch) > 0x2E7F else 1 for ch in text)
+
+
+def _md_table_element(header: List[str], aligns: List[str], rows: List[List[str]]) -> Dict[str, Any]:
+    """Native CardKit table; column widths follow content so an index column stays narrow."""
+    weights = [
+        min(max(_display_width(c) for c in [header[i], *(r[i] for r in rows)]), 60) + 4
+        for i in range(len(header))
+    ]
+    total = sum(weights)
+    widths = [max(1, round(100 * w / total)) for w in weights]
+    widths[widths.index(max(widths))] += 100 - sum(widths)
+    return {
+        "tag": "table",
+        "page_size": min(10, len(rows)),
+        "row_height": "auto",
+        "row_max_height": "999px",
+        "header_style": {"background_style": "grey", "bold": True, "text_align": "left"},
+        "columns": [
+            {
+                "name": f"c{i}",
+                "display_name": re.sub(r"[*`]", "", header[i]),
+                "data_type": "markdown",
+                "width": f"{widths[i]}%",
+                "horizontal_align": aligns[i],
+                "vertical_align": "top",
+            }
+            for i in range(len(header))
+        ],
+        "rows": [{f"c{i}": cell for i, cell in enumerate(row)} for row in rows],
+    }
+
+
+def _markdown_card_elements(markdown: str) -> List[Dict[str, Any]]:
+    """Split card markdown into markdown + native table elements; fenced code is left alone."""
+    elements: List[Dict[str, Any]] = []
+    buffer: List[str] = []
+    lines = markdown.split("\n")
+    in_fence = False
+    tables = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        is_table = (
+            not in_fence and tables < _FEISHU_CARD_MAX_TABLES and "|" in line
+            and i + 1 < len(lines) and _MD_TABLE_SEPARATOR_RE.match(lines[i + 1])
+        )
+        if is_table:
+            header = _md_table_cells(line)
+            separators = _md_table_cells(lines[i + 1])
+            j = i + 2
+            rows: List[List[str]] = []
+            while j < len(lines) and "|" in lines[j] and lines[j].strip():
+                cells = _md_table_cells(lines[j])
+                rows.append((cells + [""] * len(header))[: len(header)])
+                j += 1
+            if len(separators) == len(header) and rows:
+                aligns = [
+                    "center" if s.startswith(":") and s.endswith(":") else "right" if s.endswith(":") else "left"
+                    for s in separators
+                ]
+                text = "\n".join(buffer).strip("\n")
+                if text.strip():
+                    elements.append({"tag": "markdown", "content": text})
+                buffer = []
+                elements.append(_md_table_element(header, aligns, rows))
+                tables += 1
+                i = j
+                continue
+        buffer.append(line)
+        i += 1
+    text = "\n".join(buffer).strip("\n")
+    if text.strip():
+        elements.append({"tag": "markdown", "content": text})
+    return elements
 
 
 def _sdk_build(request_cls: Any, **fields: Any) -> Any:
@@ -3952,9 +4047,17 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _build_stream_card_json(
         self, content: str, *, streaming: bool, chat_id: Optional[str] = None,
+        native_tables: bool = False,
     ) -> str:
         body = self._prepare_stream_card_content(content)
         title = self._stream_card_title_for(chat_id)
+        elements = [{
+            "tag": "markdown",
+            "content": body,
+            "element_id": _FEISHU_STREAM_CARD_ELEMENT_ID,
+        }]
+        if native_tables:
+            elements = _markdown_card_elements(body)
         card = {
             "schema": "2.0",
             "config": {
@@ -3972,13 +4075,7 @@ class FeishuAdapter(BasePlatformAdapter):
                 "title": {"tag": "plain_text", "content": title},
                 "template": "blue",
             },
-            "body": {
-                "elements": [{
-                    "tag": "markdown",
-                    "content": body,
-                    "element_id": _FEISHU_STREAM_CARD_ELEMENT_ID,
-                }],
-            },
+            "body": {"elements": elements},
         }
         return json.dumps(card, ensure_ascii=False)
 
@@ -4058,8 +4155,8 @@ class FeishuAdapter(BasePlatformAdapter):
             ok = await self._stream_card_content(card_id, content)
             if not ok:
                 return None
-            if finalize:
-                await self._set_stream_card_mode(card_id, streaming=False, summary=content)
+            if finalize and await self._set_stream_card_mode(card_id, streaming=False, summary=content):
+                await self._apply_native_tables(card_id, content, chat_id)
             result.message_id = stream_message_id
             return result
         except Exception as exc:
@@ -4094,14 +4191,57 @@ class FeishuAdapter(BasePlatformAdapter):
                         "[Feishu] stream card content updated but failed to close streaming_mode card_id=%s",
                         card_id,
                     )
+                else:
+                    await self._apply_native_tables(card_id, content, chat_id)
             return SendResult(success=True, message_id=message_id)
         except Exception as exc:
             logger.error("[Feishu] stream card edit failed card_id=%s: %s", card_id, exc, exc_info=True)
             return SendResult(success=False, error=str(exc))
 
+    async def _apply_native_tables(self, card_id: str, content: str, chat_id: Optional[str]) -> None:
+        """Closed card only: swap markdown tables for native ones. On failure the markdown card stays."""
+        data = self._build_stream_card_json(content, streaming=False, chat_id=chat_id, native_tables=True)
+        if '"tag": "table"' not in data:
+            return
+        if await self._update_stream_card(card_id, data):
+            tables = getattr(self, "_stream_card_tables", None)
+            if tables is None:
+                tables = self._stream_card_tables = {}
+            tables[card_id] = chat_id
+
+    async def _update_stream_card(self, card_id: str, data: str) -> bool:
+        if UpdateCardRequest is None or UpdateCardRequestBody is None or Card is None:
+            return False
+        request = (
+            UpdateCardRequest.builder()
+            .card_id(card_id)
+            .request_body(
+                UpdateCardRequestBody.builder()
+                .card(Card.builder().type("card_json").data(data).build())
+                .sequence(self._next_stream_card_sequence(card_id))
+                .uuid(str(uuid.uuid4()))
+                .build()
+            )
+            .build()
+        )
+        response = await self._run_blocking(self._client.cardkit.v1.card.update, request)
+        if not self._response_succeeded(response):
+            logger.warning(
+                "[Feishu] stream card update failed card_id=%s code=%s msg=%s",
+                card_id, getattr(response, "code", None), getattr(response, "msg", None),
+            )
+            return False
+        return True
+
     async def _stream_card_content(self, card_id: str, content: str) -> bool:
         self._stream_content_error_code = None
         self._stream_content_error_msg = None
+        tables = getattr(self, "_stream_card_tables", None)
+        if tables and card_id in tables:
+            # Native tables replaced the md_body element; restore it before streaming again.
+            chat_id = tables.pop(card_id)
+            data = self._build_stream_card_json(content, streaming=True, chat_id=chat_id)
+            return await self._update_stream_card(card_id, data)
         if ContentCardElementRequest is None or ContentCardElementRequestBody is None:
             return False
         body_text = self._prepare_stream_card_content(content)

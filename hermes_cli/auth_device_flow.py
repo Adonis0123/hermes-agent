@@ -324,7 +324,9 @@ def _poll_device_token_generic(
     ``authorization_pending`` sleeps and retries; ``slow_down`` grows the interval by 1s (cap 30s).
     A non-JSON 408/429/5xx, or a 403 carrying ``x-vercel-mitigated`` (edge/WAF mitigation, never a
     real OAuth error), backs off — honoring ``Retry-After``, capped at 60s and at the device-code
-    deadline — instead of aborting a login the user may still be approving. Every other error, a
+    deadline — instead of aborting a login the user may still be approving. A transport error
+    (dropped TLS handshake, proxy EOF) is retried the same way, until the code expires, so one
+    flaky poll does not throw away a code the user may be approving right now. Every other error, a
     non-JSON error body, and the deadline become provider-specific exceptions via the supplied
     factories so each caller keeps its exact error contract.
     """
@@ -333,7 +335,12 @@ def _poll_device_token_generic(
     edge_backoff = 0.0  # kept apart from current_interval so slow_down/pending pacing is untouched
     unavailable = 0  # HTTP status of the latest edge/service failure; 0 once the endpoint answers again
     while time.monotonic() < deadline:
-        response = post()
+        try:
+            response = post()
+        except httpx.TransportError as exc:
+            logger.debug("Device-code poll transport error, retrying: %s", exc)
+            time.sleep(max(0.0, min(current_interval, deadline - time.monotonic())))
+            continue
         if response.status_code == 200:
             payload = response.json()
             validate_success(payload)
