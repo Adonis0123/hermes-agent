@@ -217,6 +217,37 @@ def test_our_topic_followup_without_mention_is_admitted():
     assert _admits_group(adapter, _topic_message(), owner, "oc_group") is True
 
 
+def _person_mention():
+    return SimpleNamespace(key="@_user_2", id=SimpleNamespace(open_id="ou_adonis", user_id=""), name="黄志华")
+
+
+def _topic_message_mentioning(*mentions):
+    message = _topic_message()
+    message.content = json.dumps({"text": " ".join(f"{m.key} 要上线一下" for m in mentions)})
+    message.mentions = list(mentions)
+    return message
+
+
+def test_owner_followup_addressed_to_someone_else_is_rejected():
+    """'这个改动在测试了 要上线一下@黄志华' in our topic talks to adonis, not to the bot."""
+    adapter = _followup_adapter()
+    owner = SimpleNamespace(open_id="ou_owner", user_id=None)
+    assert _admits_group(adapter, _topic_message_mentioning(_person_mention()), owner, "oc_group") is False
+
+
+def test_owner_followup_mentioning_bot_and_someone_else_is_admitted():
+    adapter = _followup_adapter()
+    owner = SimpleNamespace(open_id="ou_owner", user_id=None)
+    message = _topic_message_mentioning(_bot_mention(), _person_mention())
+    assert _admits_group(adapter, message, owner, "oc_group") is True
+
+
+def test_owner_followup_with_at_all_is_still_admitted():
+    adapter = _followup_adapter()
+    owner = SimpleNamespace(open_id="ou_owner", user_id=None)
+    assert _admits_group(adapter, _topic_message_mentioning(_all_mention()), owner, "oc_group") is True
+
+
 def test_stranger_in_our_topic_without_mention_is_rejected():
     adapter = _followup_adapter()
     stranger = SimpleNamespace(open_id="ou_stranger", user_id=None)
