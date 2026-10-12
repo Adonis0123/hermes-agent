@@ -2735,7 +2735,7 @@ class FeishuAdapter(BasePlatformAdapter):
         raw_message: Any, message_id: str,
     ) -> None:
         """Wrap a reaction/card click as a MessageEvent and run it through the guarded pipeline."""
-        sender_profile = await self._resolve_sender_profile(sender_id)
+        sender_profile = await self._resolve_sender_profile(sender_id, chat_id=chat_id)
         chat_info = await self.get_chat_info(chat_id)
         source = self.build_source(
             chat_id=chat_id,
@@ -2900,7 +2900,7 @@ class FeishuAdapter(BasePlatformAdapter):
         )
 
         chat_info = await self.get_chat_info(chat_id)
-        sender_profile = await self._resolve_sender_profile(sender_id, is_bot=is_bot)
+        sender_profile = await self._resolve_sender_profile(sender_id, chat_id=chat_id, is_bot=is_bot)
         source = self.build_source(
             chat_id=chat_id,
             chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
@@ -3511,16 +3511,16 @@ class FeishuAdapter(BasePlatformAdapter):
             return resolved
         return "dm" if event_chat_type == "p2p" else "group"
 
-    async def _resolve_sender_profile(self, sender_id: Any, *, is_bot: bool = False) -> dict[str, Optional[str]]:
+    async def _resolve_sender_profile(
+        self, sender_id: Any, *, chat_id: str = "", is_bot: bool = False,
+    ) -> dict[str, Optional[str]]:
         """Map Feishu's ID tiers onto SessionSource: user_id (tenant) > open_id (app) as primary,
         union_id (developer-scoped, cross-app stable) as user_id_alt — session keys prefer the alt."""
         open_id = getattr(sender_id, "open_id", None) or None
         user_id = getattr(sender_id, "user_id", None) or None
         union_id = getattr(sender_id, "union_id", None) or None
-        primary_id = user_id or open_id
-        name_lookup_id = open_id if is_bot else (primary_id or union_id)  # bots/basic_batch only takes open_id
-        display_name = await self._resolve_sender_name_from_api(name_lookup_id, is_bot=is_bot)
-        return {"user_id": primary_id, "user_name": display_name, "user_id_alt": union_id}
+        display_name = await self._resolve_sender_name_from_api(open_id, chat_id=chat_id, is_bot=is_bot)
+        return {"user_id": user_id or open_id, "user_name": display_name, "user_id_alt": union_id}
 
     def _get_cached_sender_name(self, sender_id: Optional[str]) -> Optional[str]:
         """Return a cached sender name only while its TTL is still valid."""
@@ -3533,40 +3533,55 @@ class FeishuAdapter(BasePlatformAdapter):
         self._sender_name_cache.pop(sender_id, None)
         return None
 
-    async def _resolve_sender_name_from_api(self, sender_id: Optional[str], *, is_bot: bool = False) -> Optional[str]:
-        """Bots go via bot/basic_batch (contact API has no bot names). Failures are silent — never block the pipeline."""
-        trimmed = sender_id.strip() if sender_id and self._client else ""
+    async def _resolve_sender_name_from_api(
+        self, open_id: Optional[str], *, chat_id: str = "", is_bot: bool = False,
+    ) -> Optional[str]:
+        """Bots go via bot/basic_batch; people via the chat's member list (the bot is always a member,
+        while the contact API needs a contact scope and visibility range most tenants never grant).
+        Failures are silent — never block the pipeline."""
+        trimmed = open_id.strip() if open_id and self._client else ""
         if not trimmed:
             return None
-        now = time.time()
         cached_name = self._get_cached_sender_name(trimmed)
         if cached_name is not None:
             return cached_name or None  # "" cached means "known nameless"
         if is_bot:
             names = await self._fetch_bot_names([trimmed])
-            if names is None:
-                return None
-            for oid, name in names.items():
-                self._sender_name_cache[oid] = (name, now + _FEISHU_SENDER_NAME_TTL_SECONDS)
-            hit = self._sender_name_cache.get(trimmed)
-            return (hit[0] or None) if hit else None
+        else:
+            names = await self._fetch_chat_member_names(chat_id) if chat_id else None
+        if names is None:
+            return None
+        expire_at = time.time() + _FEISHU_SENDER_NAME_TTL_SECONDS
+        for oid, name in names.items():
+            self._sender_name_cache[oid] = (name, expire_at)
+        name = names.get(trimmed, "")
+        self._sender_name_cache[trimmed] = (name, expire_at)
+        return name or None
+
+    async def _fetch_chat_member_names(self, chat_id: str) -> Optional[dict[str, str]]:
+        """open_id → name for every member of ``chat_id`` (groups and p2p chats alike)."""
+        names: dict[str, str] = {}
+        page_token = ""
         try:
-            from lark_oapi.api.contact.v3 import GetUserRequest  # lazy import
-            id_type = "open_id" if trimmed.startswith("ou_") else "union_id" if trimmed.startswith("on_") else "user_id"
-            request = GetUserRequest.builder().user_id(trimmed).user_id_type(id_type).build()
-            response = await self._run_blocking(self._client.contact.v3.user.get, request)
-            if not response or not response.success():
-                return None
-            user = getattr(getattr(response, "data", None), "user", None)
-            candidates = (getattr(user, k, None) for k in ("name", "display_name", "nickname", "en_name"))
-            name = next((value for value in candidates if value), None)
-            if name and isinstance(name, str) and name.strip():
-                name = name.strip()
-                self._sender_name_cache[trimmed] = (name, now + _FEISHU_SENDER_NAME_TTL_SECONDS)
-                return name
+            while True:
+                queries = [("member_id_type", "open_id"), ("page_size", "100")]
+                if page_token:
+                    queries.append(("page_token", page_token))
+                content = await self._tenant_get_raw(f"/open-apis/im/v1/chats/{chat_id}/members", queries=queries)
+                payload = json.loads(content) if content else {}
+                if payload.get("code") != 0:
+                    logger.debug("[Feishu] chat members lookup for %s failed: %s", chat_id, payload.get("msg"))
+                    return None
+                data = payload.get("data") or {}
+                for item in data.get("items") or []:
+                    if item.get("member_id"):
+                        names[item["member_id"]] = str(item.get("name") or "").strip()
+                page_token = data.get("page_token") or ""
+                if not data.get("has_more") or not page_token:
+                    return names
         except Exception:
-            logger.debug("[Feishu] Failed to resolve sender name for %s", sender_id, exc_info=True)
-        return None
+            logger.debug("[Feishu] Failed to fetch chat members for %s", chat_id, exc_info=True)
+            return None
 
     async def _tenant_get_raw(self, uri: str, *, queries: Optional[list[tuple[str, str]]] = None) -> Any:
         """GET ``uri`` with the tenant token via the raw client; returns the raw response content."""
@@ -3740,6 +3755,9 @@ class FeishuAdapter(BasePlatformAdapter):
         thread_id = getattr(message, "thread_id", None) or None
         if not (root_id or thread_id):
             return False
+        # "@Bob 要上线一下" in our topic is addressed to Bob, not to us: only @ to us re-admits it.
+        if self._mentions_other(message):
+            return False
         entry = self._topic_session_entry(
             chat_id=getattr(message, "chat_id", "") or "",
             root_id=root_id,
@@ -3825,6 +3843,14 @@ class FeishuAdapter(BasePlatformAdapter):
 
     def _post_mentions_bot(self, mentions: list[FeishuMentionRef]) -> bool:
         return any(m.is_self for m in mentions)
+
+    def _mentions_other(self, message: Any) -> bool:
+        """True when the message @-mentions a person or another bot (not us; @all is a broadcast)."""
+        normalized = self._normalize(
+            getattr(message, "message_type", "") or "", getattr(message, "content", "") or "",
+            getattr(message, "mentions", None),
+        )
+        return any(not m.is_self and not m.is_all for m in normalized.mentions)
 
     def _bot_identity(self) -> _FeishuBotIdentity:
         return _FeishuBotIdentity(open_id=self._bot_open_id, user_id=self._bot_user_id, name=self._bot_name)
