@@ -903,7 +903,7 @@ class TestAdapterBehavior(unittest.TestCase):
 
         adapter = FeishuAdapter(PlatformConfig())
         adapter._dispatch_inbound_event = AsyncMock()
-        # Sender name now comes from the contact API; mock it to return a known value.
+        # Sender name comes from the chat member list; mock it to return a known value.
         adapter._resolve_sender_name_from_api = AsyncMock(return_value="张三")
         adapter.get_chat_info = AsyncMock(
             return_value={"chat_id": "oc_chat", "name": "Feishu DM", "type": "dm"}
@@ -2389,16 +2389,13 @@ def fake_lark_requests(monkeypatch):
 
     import plugins.platforms.feishu.adapter as feishu_mod
 
-    for parent in ("lark_oapi", "lark_oapi.api", "lark_oapi.api.im", "lark_oapi.api.contact"):
+    for parent in ("lark_oapi", "lark_oapi.api", "lark_oapi.api.im"):
         if parent not in sys.modules:
             monkeypatch.setitem(sys.modules, parent, types.ModuleType(parent))
     im_v1 = types.ModuleType("lark_oapi.api.im.v1")
     for name in ("CreateMessageReactionRequest", "CreateMessageReactionRequestBody", "DeleteMessageReactionRequest"):
         setattr(im_v1, name, _FakeSdkRequestType)
-    contact_v3 = types.ModuleType("lark_oapi.api.contact.v3")
-    contact_v3.GetUserRequest = _FakeSdkRequestType
     monkeypatch.setitem(sys.modules, "lark_oapi.api.im.v1", im_v1)
-    monkeypatch.setitem(sys.modules, "lark_oapi.api.contact.v3", contact_v3)
     monkeypatch.setattr(
         feishu_mod, "_tenant_get_request",
         lambda uri, *, queries=None: SimpleNamespace(uri=uri, queries=queries),
@@ -2461,22 +2458,51 @@ def test_bot_sender_name_is_fetched_via_basic_batch_and_cached(fake_lark_request
     assert requests[0].queries == [("bot_ids", "ou_peer")]
 
 
-def test_human_sender_name_is_fetched_from_contact_api_and_cached(fake_lark_requests):
+def test_human_sender_name_is_fetched_from_chat_members_and_cached(fake_lark_requests):
+    """People resolve via the chat's member list (no contact scope needed); all pages are read
+    once and every member is cached, so the next sender in the same chat is free."""
     adapter = _plain_feishu_adapter()
-    lookups = []
+    requests = []
+    pages = {
+        "": {"items": [{"member_id": "ou_alice", "name": "Alice"}], "has_more": True, "page_token": "p2"},
+        "p2": {"items": [{"member_id": "ou_bob", "name": "Bob"}], "has_more": False, "page_token": ""},
+    }
 
-    def _get(request):
-        lookups.append(request)
-        user = SimpleNamespace(name="Bob", display_name=None, nickname=None, en_name=None)
-        return SimpleNamespace(success=lambda: True, data=SimpleNamespace(user=user))
+    def _request(req):
+        requests.append(req)
+        token = dict(req.queries).get("page_token", "")
+        return SimpleNamespace(raw=SimpleNamespace(content=json.dumps({"code": 0, "data": pages[token]}).encode()))
 
-    adapter._client = SimpleNamespace(contact=SimpleNamespace(v3=SimpleNamespace(user=SimpleNamespace(get=_get))))
+    adapter._client = SimpleNamespace(request=_request)
 
-    assert asyncio.run(adapter._resolve_sender_name_from_api("ou_bob")) == "Bob"
-    assert asyncio.run(adapter._resolve_sender_name_from_api("ou_bob")) == "Bob"
+    assert asyncio.run(adapter._resolve_sender_name_from_api("ou_bob", chat_id="oc_chat")) == "Bob"
+    assert asyncio.run(adapter._resolve_sender_name_from_api("ou_alice", chat_id="oc_chat")) == "Alice"
 
-    assert len(lookups) == 1, "second lookup must hit the cache"
-    assert (lookups[0].user_id, lookups[0].user_id_type) == ("ou_bob", "open_id")
+    assert len(requests) == 2, "two pages, then everything comes from the cache"
+    assert {r.uri for r in requests} == {"/open-apis/im/v1/chats/oc_chat/members"}
+    assert ("member_id_type", "open_id") in requests[0].queries
+
+
+def test_human_sender_outside_member_list_is_cached_nameless(fake_lark_requests):
+    adapter = _plain_feishu_adapter()
+    requests = []
+    body = {"code": 0, "data": {"items": [{"member_id": "ou_alice", "name": "Alice"}], "has_more": False}}
+
+    def _request(req):
+        requests.append(req)
+        return SimpleNamespace(raw=SimpleNamespace(content=json.dumps(body).encode()))
+
+    adapter._client = SimpleNamespace(request=_request)
+
+    assert asyncio.run(adapter._resolve_sender_name_from_api("ou_ghost", chat_id="oc_chat")) is None
+    assert asyncio.run(adapter._resolve_sender_name_from_api("ou_ghost", chat_id="oc_chat")) is None
+    assert len(requests) == 1
+
+
+def test_human_sender_name_needs_a_chat(fake_lark_requests):
+    adapter = _plain_feishu_adapter()
+    adapter._client = SimpleNamespace(request=lambda req: pytest.fail("no chat, no lookup"))
+    assert asyncio.run(adapter._resolve_sender_name_from_api("ou_bob")) is None
 
 
 def _reaction_adapter(*, delete_success=True):
