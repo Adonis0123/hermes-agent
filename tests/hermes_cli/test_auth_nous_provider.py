@@ -1085,6 +1085,36 @@ class TestStalePortalBaseUrlMigration:
 # =============================================================================
 
 
+def test_poll_device_token_retries_transport_error(monkeypatch):
+    """A dropped TLS handshake mid-poll must not abort the login."""
+    from hermes_cli.auth_device_flow import _poll_device_token_generic
+
+    monkeypatch.setattr("hermes_cli.auth_device_flow.time.sleep", lambda _s: None)
+    request = httpx.Request("POST", "https://auth.x.ai/oauth2/token")
+    responses = [
+        httpx.ConnectError("[SSL: UNEXPECTED_EOF_WHILE_READING]", request=request),
+        httpx.Response(400, json={"error": "authorization_pending"}, request=request),
+        httpx.Response(200, json={"access_token": "a", "refresh_token": "r"}, request=request),
+    ]
+
+    def post():
+        item = responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    payload = _poll_device_token_generic(
+        post, expires_in=60, poll_interval=1,
+        validate_success=lambda _p: None,
+        on_non_json_error=lambda _r: RuntimeError("non-json"),
+        on_error=lambda _r, _p: RuntimeError("error"),
+        on_timeout=lambda: TimeoutError("timeout"),
+    )
+
+    assert payload["access_token"] == "a"
+    assert responses == []
+
+
 def test_poll_for_token_timeout_raises_actionable_message():
     """The poll deadline must raise the CAPTCHA-aware guidance at the SOURCE,
     so both the CLI login and the dashboard poller (web_server_oauth._nous_poller,
