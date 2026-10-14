@@ -1696,6 +1696,7 @@ class TestGroupMentionAtAll(unittest.TestCase):
     """Tests for @_all (Feishu @everyone) group mention routing."""
 
     @patch.dict(os.environ, {"FEISHU_GROUP_POLICY": "allowlist", "FEISHU_ALLOWED_USERS": "ou_allowed"}, clear=True)
+    @unittest.skip("owner overlay: @_all is not a bot mention; see test_feishu_overlay_contracts.py::test_at_all_still_requires_policy_gate")
     def test_at_all_still_requires_policy_gate(self):
         """@_all bypasses mention gating but NOT the allowlist policy."""
         from gateway.config import PlatformConfig
@@ -2149,6 +2150,7 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
         self.assertNotIn("[Mentioned:", event.text)
         self.assertTrue(event.text.startswith("/model"))
 
+    @unittest.skip("owner overlay: a group reply joins its topic root; see test_feishu_overlay_contracts.py::test_reply_to_ignores_root_id")
     def test_regular_reply_root_id_does_not_become_thread_id(self):
         adapter = self._build_adapter()
         adapter._fetch_message_text = AsyncMock(return_value="parent text")
@@ -2180,6 +2182,7 @@ class TestFeishuProcessInboundMessage(unittest.TestCase):
         self.assertEqual(event.reply_to_message_id, "om_root")
         self.assertEqual(event.reply_to_text, "parent text")
 
+    @unittest.skip("owner overlay: a topic is keyed by its om_ root; see test_feishu_overlay_contracts.py::test_group_prefers_root_id_over_thread_id")
     def test_explicit_thread_id_is_preserved(self):
         adapter = self._build_adapter()
         message = SimpleNamespace(
