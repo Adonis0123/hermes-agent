@@ -207,6 +207,10 @@ _FEISHU_REACTION_FAILURE = "CrossMark"
 # delete-failures, not a capacity plan.
 _FEISHU_PROCESSING_REACTION_CACHE_SIZE = 1024
 _FEISHU_MESSAGE_TEXT_CACHE_SIZE = 512       # LRU cap for reply-context message text lookups
+# A plain in-topic reply carries parent_id == root_id; tell the agent it is not a quote.
+_FEISHU_TOPIC_ROOT_REPLY_NOTE = (
+    "话题首条（用户没点引用，只是在话题里回复；他答的是话题里最新的提问，不一定是这条）："
+)
 
 _FEISHU_STREAM_CARD_ELEMENT_ID = "md_body"
 _FEISHU_STREAM_CARD_PREFIX = "card:"
@@ -2888,6 +2892,8 @@ class FeishuAdapter(BasePlatformAdapter):
         thread_id = self._resolve_inbound_thread_id(message, chat_type=chat_type, message_id=message_id)
         reply_to_message_id = self._resolve_inbound_reply_to(message)
         reply_to_text = await self._fetch_message_text(reply_to_message_id) if reply_to_message_id else None
+        if reply_to_text and self._inbound_reply_is_topic_root(message):
+            reply_to_text = f"{_FEISHU_TOPIC_ROOT_REPLY_NOTE}{reply_to_text}"
         sender_primary = (
             getattr(sender_id, "open_id", None) or getattr(sender_id, "user_id", None)
             or getattr(sender_id, "union_id", None) or "<unknown>"
@@ -2938,6 +2944,11 @@ class FeishuAdapter(BasePlatformAdapter):
     def _resolve_inbound_reply_to(message: Any) -> Optional[str]:
         # parent/upper is the quoted card; root_id is the topic root and would steal the quote body.
         return getattr(message, "parent_id", None) or getattr(message, "upper_message_id", None) or None
+
+    @staticmethod
+    def _inbound_reply_is_topic_root(message: Any) -> bool:
+        parent_id = getattr(message, "parent_id", None)
+        return bool(parent_id) and parent_id == getattr(message, "root_id", None)
 
     async def _dispatch_inbound_event(self, event: MessageEvent) -> None:
         """Apply Feishu-specific burst protection before entering the base adapter."""
