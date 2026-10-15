@@ -6,7 +6,7 @@ Upgrade gate (rebase, cherry-pick, or adapter rewrite port):
 Missing file or any fail = overlay not done. Do not report 齐.
 Whole ``test_feishu.py`` green is not enough (v0.21.1 quiet port, 2026-09-08).
 Covers: @_all is not a mention; group auto_thread; DM flatten; quote body ignores
-root_id; in-topic follow-up only for our session + original sender; CardKit
+root_id; a plain in-topic reply (parent == root) is labelled as the topic root, not a quote; in-topic follow-up only for our session + original sender; CardKit
 send path (v0.21.2/v0.21.3 dropped ``_send_stream_card`` while config stayed on);
 plain send must call a real ``_send_post_or_text`` (v0.21.4 overlay called it
 without defining it, so the hook's plain relay failed and it DMed);
@@ -184,6 +184,20 @@ def test_reply_to_ignores_root_id():
     assert adapter._resolve_inbound_reply_to(message) == "om_parent"
     message_root_only = _thread_message(message_id="om_follow", root_id="om_root")
     assert adapter._resolve_inbound_reply_to(message_root_only) is None
+
+
+def test_plain_topic_reply_is_marked_as_topic_root():
+    """A plain in-topic reply has parent_id == root_id; it is not a quote of the root card.
+
+    2026-10-14: the relay read a reply to the 23:45 card as a quote of the 17:21 root and refused to send.
+    """
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+
+    plain = _thread_message(message_id="om_follow", root_id="om_root", parent_id="om_root")
+    quoted = _thread_message(message_id="om_follow", root_id="om_root", parent_id="om_card")
+    assert FeishuAdapter._inbound_reply_is_topic_root(plain) is True
+    assert FeishuAdapter._inbound_reply_is_topic_root(quoted) is False
+    assert FeishuAdapter._inbound_reply_is_topic_root(_thread_message(message_id="om_x")) is False
 
 
 def _followup_adapter(*, owner="ou_owner", thread="om_ours"):
