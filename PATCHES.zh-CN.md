@@ -17,7 +17,7 @@
 
 ## 1. 跨工具轮保持同一条编辑流
 
-提交：[`b5363621f6`](https://github.com/Adonis0123/hermes-agent/commit/b5363621f62fca705dfe7994d9092dbc72d9c3bf)
+提交：[`7bbf757f09`](https://github.com/Adonis0123/hermes-agent/commit/7bbf757f090b017b54c790ce15402dd3ef8698d0)
 
 **作用。** stream consumer（流式输出消费者）会调用适配器的可选方法
 `stream_is_message_for_chat(chat_id, metadata)`。返回 `True` 时，工具分段不再封住当前编辑消息，
@@ -33,7 +33,7 @@
 
 ## 2. 飞书安静回复、CardKit 流式卡片、插件发送命令
 
-提交：[`5719ec96ea`](https://github.com/Adonis0123/hermes-agent/commit/5719ec96ea75cfb3a367584fa5469e6f258d585c), [`4b6cf8bfef`](https://github.com/Adonis0123/hermes-agent/commit/4b6cf8bfefcd2624f66b371cd3bc00bbd3f08b4e), [`20ccec38f2`](https://github.com/Adonis0123/hermes-agent/commit/20ccec38f2a46e484e747bf35abf31418c99ed89), [`173e18529f`](https://github.com/Adonis0123/hermes-agent/commit/173e18529f24a1b038fa8a01ec6071f3eb78411c)
+提交：[`8d72901724`](https://github.com/Adonis0123/hermes-agent/commit/8d7290172494c4b01c5ad064498ec873dc67eb0d), [`e5d2891fc4`](https://github.com/Adonis0123/hermes-agent/commit/e5d2891fc48ff7a9ca668916b20eac1afa1c90bf), [`c3316c1889`](https://github.com/Adonis0123/hermes-agent/commit/c3316c1889911034fd3dbd3956e984d2fd29bbba), [`641e165291`](https://github.com/Adonis0123/hermes-agent/commit/641e1652910c1a1c8d2d177ea69558c9d22d03dd), [`12d21e2bc8`](https://github.com/Adonis0123/hermes-agent/commit/12d21e2bc82fa749d1cde26759b65066d91fa5b8)
 
 **作用。**
 
@@ -48,6 +48,7 @@
 - `config.yaml` 里的飞书配置项可以放在 `platforms.feishu` 或 `platforms.feishu.extra` 下。
 - 流式卡片收尾时，markdown 表格渲染成 CardKit 原生表格。
 - 话题里的追问如果 @ 的是别人而不是机器人，不会被接收，agent 不会去执行发给同事的话。发送人名字从群成员接口取。
+- 话题里不点引用直接回复时，飞书给的 `parent_id` 等于 `root_id`。agent 看到的引用内容会标成「话题首条」而不是引用，agent 按话题里最新的提问作答。
 
 **文件。** `plugins/platforms/feishu/adapter.py`、`plugins/platforms/feishu/cli.py`、
 `tests/gateway/test_feishu_overlay_contracts.py`、`tests/gateway/test_feishu_stream_card.py`、
@@ -75,7 +76,7 @@ CardKit 卡片和 `hermes feishu send` 是通用能力，可以拆成独立的�
 
 ## 3. `/new` 自定义提示语和精简模型行
 
-提交：[`5da8fc9e20`](https://github.com/Adonis0123/hermes-agent/commit/5da8fc9e205363710cbfe3c96d5fca6d6a9fee19), [`0011cc0b95`](https://github.com/Adonis0123/hermes-agent/commit/0011cc0b95d43e6ce78775973d5dc02cbdc4aaa8), [`8e2444625d`](https://github.com/Adonis0123/hermes-agent/commit/8e2444625dc5524d442044b82ed22cd4d3101a15)
+提交：[`a24d61033e`](https://github.com/Adonis0123/hermes-agent/commit/a24d61033e12f6abcb10a06ed9747516db495cb4), [`42019ab4f6`](https://github.com/Adonis0123/hermes-agent/commit/42019ab4f60b7e6e626649fef59e69c6e209761e), [`973abc6380`](https://github.com/Adonis0123/hermes-agent/commit/973abc6380d7d8b0547f8766b7e2fbccf76a974f)
 
 **作用。** `display.tips` 提供 gateway `/new` 和 `/reset` 末尾的那行提示。
 列表非空时只从列表里随机抽一行，不带提示标签，同一个聊天不会连续抽到同一行。
@@ -91,7 +92,7 @@ CardKit 卡片和 `hermes feishu send` 是通用能力，可以拆成独立的�
 
 ## 4. 设备码轮询遇到网络错误时重试
 
-提交：[`5da8fc9e20`](https://github.com/Adonis0123/hermes-agent/commit/5da8fc9e205363710cbfe3c96d5fca6d6a9fee19), [`b18e88dfe0`](https://github.com/Adonis0123/hermes-agent/commit/b18e88dfe009469c92cf1db5c64763dd1a4519e4)
+提交：[`a24d61033e`](https://github.com/Adonis0123/hermes-agent/commit/a24d61033e12f6abcb10a06ed9747516db495cb4), [`5b5ab87295`](https://github.com/Adonis0123/hermes-agent/commit/5b5ab87295138a6bbd2af8a072a6c8897b2f3e7c)
 
 **作用。** xAI Grok OAuth 和 Nous 登录共用一个 RFC 8628 轮询函数（`_poll_device_token_generic`）。
 现在它遇到 `httpx.TransportError` 时按 `authorization_pending` 处理：等一个间隔再轮询，直到验证码过期。
@@ -106,14 +107,14 @@ CardKit 卡片和 `hermes feishu send` 是通用能力，可以拆成独立的�
 
 ## 5. 失败轮提示跟随 `display.language`
 
-提交：[`5da8fc9e20`](https://github.com/Adonis0123/hermes-agent/commit/5da8fc9e205363710cbfe3c96d5fca6d6a9fee19), [`b18e88dfe0`](https://github.com/Adonis0123/hermes-agent/commit/b18e88dfe009469c92cf1db5c64763dd1a4519e4)
+提交：[`a24d61033e`](https://github.com/Adonis0123/hermes-agent/commit/a24d61033e12f6abcb10a06ed9747516db495cb4), [`5b5ab87295`](https://github.com/Adonis0123/hermes-agent/commit/5b5ab87295138a6bbd2af8a072a6c8897b2f3e7c)
 
 **作用。** 失败轮结尾那条助手边界消息（"Your request was not processed…" / "This turn did not complete…"）
 现在按 `agent.i18n.get_language()` 选语言（`HERMES_LANGUAGE` > `display.language` > `en`）。
 中文（`zh`）有自己的文案，其他语言仍用英文。`untyped_failed_turn_display_kind` 能认出任一语言的提示，
 旧消息照样按边界处理。英文常量和 `failed_turn_notice(turn_messages)` 保持兼容，新增可选参数 `lang=`。
 
-**文件。** `agent/turn_failure_copy.py`、`gateway/run_turn.py`、
+**文件。** `agent/turn_failure_copy.py`、`gateway/run_turn_persistence.py`（v0.22.0 从 `gateway/run_turn.py` 拆出）、
 `tests/agent/test_turn_failure_copy_language.py`
 
 **配置项。** 无新增，读取 `display.language`。
