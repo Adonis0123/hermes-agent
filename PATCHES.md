@@ -16,7 +16,7 @@ This fork is [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-
 
 ## 1. Keep one edit stream across tool rounds
 
-Commits: [`b5363621f6`](https://github.com/Adonis0123/hermes-agent/commit/b5363621f62fca705dfe7994d9092dbc72d9c3bf)
+Commits: [`7bbf757f09`](https://github.com/Adonis0123/hermes-agent/commit/7bbf757f090b017b54c790ce15402dd3ef8698d0)
 
 **What it does.** The stream consumer asks the adapter an optional question,
 `stream_is_message_for_chat(chat_id, metadata)`. When the adapter answers `True`, a tool
@@ -34,7 +34,7 @@ adapter capability rather than a Feishu special case.
 
 ## 2. Quiet Feishu replies, CardKit stream card, plugin send
 
-Commits: [`5719ec96ea`](https://github.com/Adonis0123/hermes-agent/commit/5719ec96ea75cfb3a367584fa5469e6f258d585c), [`4b6cf8bfef`](https://github.com/Adonis0123/hermes-agent/commit/4b6cf8bfefcd2624f66b371cd3bc00bbd3f08b4e), [`20ccec38f2`](https://github.com/Adonis0123/hermes-agent/commit/20ccec38f2a46e484e747bf35abf31418c99ed89), [`173e18529f`](https://github.com/Adonis0123/hermes-agent/commit/173e18529f24a1b038fa8a01ec6071f3eb78411c)
+Commits: [`8d72901724`](https://github.com/Adonis0123/hermes-agent/commit/8d7290172494c4b01c5ad064498ec873dc67eb0d), [`e5d2891fc4`](https://github.com/Adonis0123/hermes-agent/commit/e5d2891fc48ff7a9ca668916b20eac1afa1c90bf), [`c3316c1889`](https://github.com/Adonis0123/hermes-agent/commit/c3316c1889911034fd3dbd3956e984d2fd29bbba), [`641e165291`](https://github.com/Adonis0123/hermes-agent/commit/641e1652910c1a1c8d2d177ea69558c9d22d03dd), [`12d21e2bc8`](https://github.com/Adonis0123/hermes-agent/commit/12d21e2bc82fa749d1cde26759b65066d91fa5b8)
 
 **What it does.**
 
@@ -50,6 +50,7 @@ Commits: [`5719ec96ea`](https://github.com/Adonis0123/hermes-agent/commit/5719ec
 - Feishu keys in `config.yaml` may sit under `platforms.feishu` or `platforms.feishu.extra`.
 - Markdown tables in the final stream card are rendered as native CardKit tables.
 - A topic follow-up that @-mentions someone other than the bot is not admitted, so the agent does not act on a message meant for a teammate. Sender names come from the chat members API.
+- A plain reply inside a topic carries `parent_id == root_id`. The quoted text the agent sees is labelled as the topic root, not as a quote, so the agent answers the latest question in the topic.
 
 **Files.** `plugins/platforms/feishu/adapter.py`, `plugins/platforms/feishu/cli.py`,
 `tests/gateway/test_feishu_overlay_contracts.py`, `tests/gateway/test_feishu_stream_card.py`,
@@ -78,7 +79,7 @@ The CardKit card and `hermes feishu send` are generic and could be offered as se
 
 ## 3. Owner tips and a short model line on `/new`
 
-Commits: [`5da8fc9e20`](https://github.com/Adonis0123/hermes-agent/commit/5da8fc9e205363710cbfe3c96d5fca6d6a9fee19), [`0011cc0b95`](https://github.com/Adonis0123/hermes-agent/commit/0011cc0b95d43e6ce78775973d5dc02cbdc4aaa8), [`8e2444625d`](https://github.com/Adonis0123/hermes-agent/commit/8e2444625dc5524d442044b82ed22cd4d3101a15)
+Commits: [`a24d61033e`](https://github.com/Adonis0123/hermes-agent/commit/a24d61033e12f6abcb10a06ed9747516db495cb4), [`42019ab4f6`](https://github.com/Adonis0123/hermes-agent/commit/42019ab4f60b7e6e626649fef59e69c6e209761e), [`973abc6380`](https://github.com/Adonis0123/hermes-agent/commit/973abc6380d7d8b0547f8766b7e2fbccf76a974f)
 
 **What it does.** `display.tips` supplies the line appended to gateway `/new` and `/reset`.
 A non-empty list is the whole pool: one line is drawn at random, printed without the tip label,
@@ -96,7 +97,7 @@ preference and removes information upstream shows on purpose.
 
 ## 4. Retry device-code polls on transport errors
 
-Commits: [`5da8fc9e20`](https://github.com/Adonis0123/hermes-agent/commit/5da8fc9e205363710cbfe3c96d5fca6d6a9fee19), [`b18e88dfe0`](https://github.com/Adonis0123/hermes-agent/commit/b18e88dfe009469c92cf1db5c64763dd1a4519e4)
+Commits: [`a24d61033e`](https://github.com/Adonis0123/hermes-agent/commit/a24d61033e12f6abcb10a06ed9747516db495cb4), [`5b5ab87295`](https://github.com/Adonis0123/hermes-agent/commit/5b5ab87295138a6bbd2af8a072a6c8897b2f3e7c)
 
 **What it does.** The shared RFC 8628 poller (`_poll_device_token_generic`, used by the xAI Grok
 OAuth and Nous logins) treats an `httpx.TransportError` like `authorization_pending`: it sleeps one
@@ -112,7 +113,7 @@ still approving the code.
 
 ## 5. Failed-turn notices follow `display.language`
 
-Commits: [`5da8fc9e20`](https://github.com/Adonis0123/hermes-agent/commit/5da8fc9e205363710cbfe3c96d5fca6d6a9fee19), [`b18e88dfe0`](https://github.com/Adonis0123/hermes-agent/commit/b18e88dfe009469c92cf1db5c64763dd1a4519e4)
+Commits: [`a24d61033e`](https://github.com/Adonis0123/hermes-agent/commit/a24d61033e12f6abcb10a06ed9747516db495cb4), [`5b5ab87295`](https://github.com/Adonis0123/hermes-agent/commit/5b5ab87295138a6bbd2af8a072a6c8897b2f3e7c)
 
 **What it does.** The assistant boundary row that closes a failed turn ("Your request was not
 processed…" / "This turn did not complete…") is chosen in the active language through
@@ -121,7 +122,7 @@ own copy; every other language keeps the English text. `untyped_failed_turn_disp
 the notice in any shipped language, so legacy rows still read back as boundaries. The English
 constants and `failed_turn_notice(turn_messages)` stay compatible; it takes an optional `lang=`.
 
-**Files.** `agent/turn_failure_copy.py`, `gateway/run_turn.py`,
+**Files.** `agent/turn_failure_copy.py`, `gateway/run_turn_persistence.py` (moved out of `gateway/run_turn.py` in v0.22.0),
 `tests/agent/test_turn_failure_copy_language.py`
 
 **Config keys.** None new; reads `display.language`.
