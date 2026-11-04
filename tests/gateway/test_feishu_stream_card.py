@@ -359,6 +359,119 @@ class TestStreamCardTitleOnCreate(unittest.IsolatedAsyncioTestCase):
         adapter._create_stream_card_entity.assert_awaited_once_with("hi", chat_id="oc_named")
 
 
+class TestStreamCardHeader(unittest.IsolatedAsyncioTestCase):
+    """stream_card_header=false drops the title bar on every full card build; per chat overrides global."""
+
+    _TABLE = "| a | b |\n|---|---|\n| 1 | 2 |"
+
+    def _load(self, extra):
+        import os
+        from unittest.mock import patch
+
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        clean = {k: v for k, v in os.environ.items() if k != "FEISHU_STREAM_CARD_HEADER"}
+        with patch.dict(os.environ, clean, clear=True):
+            return FeishuAdapter._load_settings(extra)
+
+    def _adapter(self, settings):
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = object.__new__(FeishuAdapter)
+        adapter._stream_card_title = settings.stream_card_title
+        adapter._stream_card_header = settings.stream_card_header
+        adapter._group_rules = settings.group_rules
+        return adapter
+
+    async def _built_cards(self, adapter, chat_id):
+        """Card JSON from every build path: create, finalize native-table swap, table restore."""
+        import json
+        from unittest.mock import MagicMock, patch
+
+        import plugins.platforms.feishu.adapter as mod
+
+        cards = []
+        create_req = MagicMock()
+        create_body = MagicMock()
+        create_body.builder.return_value.type.return_value.data.side_effect = (
+            lambda data: cards.append(json.loads(data)) or MagicMock()
+        )
+        adapter._client = SimpleNamespace(cardkit=SimpleNamespace(v1=SimpleNamespace(card=SimpleNamespace(create=None))))
+        adapter._run_blocking = AsyncMock(return_value=SimpleNamespace(code=1, msg="stop"))
+        adapter._response_succeeded = lambda response: False
+        with patch.object(mod, "CreateCardRequest", create_req), patch.object(mod, "CreateCardRequestBody", create_body):
+            await adapter._create_stream_card_entity("hi", chat_id=chat_id)
+
+        async def update(card_id, data):
+            cards.append(json.loads(data))
+            return True
+
+        adapter._update_stream_card = update
+        await adapter._apply_native_tables("card_1", self._TABLE, chat_id)
+        await adapter._stream_card_content("card_1", "more")
+        self.assertEqual(len(cards), 3)
+        return cards
+
+    async def test_default_keeps_header_on_every_path(self):
+        settings = self._load({})
+        self.assertTrue(settings.stream_card_header)
+        cards = await self._built_cards(self._adapter(settings), "oc_any")
+        for card in cards:
+            self.assertEqual(card["schema"], "2.0")
+            self.assertEqual(card["header"]["title"]["content"], "Hermes")
+
+    async def test_global_off_drops_header_on_every_path(self):
+        settings = self._load({"stream_card_header": False})
+        self.assertFalse(settings.stream_card_header)
+        cards = await self._built_cards(self._adapter(settings), "oc_any")
+        for card in cards:
+            self.assertNotIn("header", card)
+            self.assertIn("body", card)
+
+    def test_bare_adapter_keeps_header(self):
+        import json
+
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        card = json.loads(object.__new__(FeishuAdapter)._build_stream_card_json("b", streaming=True))
+        self.assertIn("header", card)
+
+    async def test_group_rule_overrides_global(self):
+        settings = self._load({
+            "stream_card_header": "false",
+            "group_rules": {
+                "oc_on": {"policy": "open", "stream_card_header": True, "stream_card_title": "Group Bot"},
+                "oc_inherit": {"policy": "open"},
+            },
+        })
+        self.assertTrue(settings.group_rules["oc_on"].stream_card_header)
+        self.assertIsNone(settings.group_rules["oc_inherit"].stream_card_header)
+        adapter = self._adapter(settings)
+        for card in await self._built_cards(adapter, "oc_on"):
+            self.assertEqual(card["header"]["title"]["content"], "Group Bot")
+        for card in await self._built_cards(adapter, "oc_inherit"):
+            self.assertNotIn("header", card)
+
+        settings = self._load({"group_rules": {"oc_off": {"policy": "open", "stream_card_header": False}}})
+        adapter = self._adapter(settings)
+        for card in await self._built_cards(adapter, "oc_off"):
+            self.assertNotIn("header", card)
+        for card in await self._built_cards(adapter, "oc_other"):
+            self.assertIn("header", card)
+
+    def test_yaml_bridge_seeds_header_from_extra(self):
+        import os
+        from unittest.mock import patch
+
+        from plugins.platforms.feishu.adapter import _apply_yaml_config
+
+        clean = {k: v for k, v in os.environ.items() if k != "FEISHU_STREAM_CARD_HEADER"}
+        with patch.dict(os.environ, clean, clear=True):
+            seeded = _apply_yaml_config({}, {"extra": {"stream_card_header": False}})
+            self.assertEqual(seeded, {"stream_card_header": False})
+            self.assertEqual(os.environ.get("FEISHU_STREAM_CARD_HEADER"), "false")
+
+
 class TestOverlaySettingsReadProfileScope(unittest.TestCase):
     """Overlay env reads go through the profile secret scope, like upstream settings."""
 

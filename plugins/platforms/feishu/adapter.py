@@ -364,6 +364,7 @@ class FeishuAdapterSettings:
     stream_card_enabled: bool = False
     stream_card_in_thread: bool = False
     stream_card_title: str = _DEFAULT_STREAM_CARD_TITLE
+    stream_card_header: bool = True  # False drops the title bar from every stream card build
     auto_thread_enabled: bool = True
     route_inbound_reactions: bool = False
     # open_id -> display name; replaces the member-list profile name for inbound user_name only.
@@ -381,6 +382,7 @@ class FeishuGroupRule:
     stream_card: Optional[bool] = None
     stream_card_in_thread: Optional[bool] = None
     stream_card_title: Optional[str] = None  # None = inherit global
+    stream_card_header: Optional[bool] = None  # None = inherit global
 
 
 @dataclass
@@ -1565,6 +1567,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
                     stream_card=_to_boolean(rule_cfg["stream_card"]) if "stream_card" in rule_cfg else None,
                     stream_card_in_thread=_to_boolean(rule_cfg["stream_card_in_thread"]) if "stream_card_in_thread" in rule_cfg else None,
                     stream_card_title=str(rule_cfg.get("stream_card_title") or "").strip() or None,
+                    stream_card_header=_to_boolean(rule_cfg["stream_card_header"]) if "stream_card_header" in rule_cfg else None,
                 )
 
         # Scoped read: under multiplex a secondary profile's .env must govern its own adapter; yaml
@@ -1622,6 +1625,9 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
             stream_card_title=str(
                 extra.get("stream_card_title") or _get_scoped_secret("FEISHU_STREAM_CARD_TITLE", "") or ""
             ).strip() or _DEFAULT_STREAM_CARD_TITLE,
+            stream_card_header=_to_boolean(
+                extra.get("stream_card_header", _get_scoped_secret("FEISHU_STREAM_CARD_HEADER", "true"))
+            ),
             auto_thread_enabled=_to_boolean(
                 extra.get("auto_thread", _get_scoped_secret("FEISHU_AUTO_THREAD", str(_DEFAULT_AUTO_THREAD_ENABLED).lower()))
             ),
@@ -4132,7 +4138,6 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
         native_tables: bool = False,
     ) -> str:
         body = self._prepare_stream_card_content(content)
-        title = self._stream_card_title_for(chat_id)
         elements = [{
             "tag": "markdown",
             "content": body,
@@ -4153,12 +4158,15 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
                 "width_mode": "default",
                 "enable_forward": True,
             },
-            "header": {
-                "title": {"tag": "plain_text", "content": title},
-                "template": "blue",
-            },
             "body": {"elements": elements},
         }
+        # Every full card build (create, native-table swap, table restore) goes through here,
+        # so the header choice holds for the whole card lifetime. Schema 2.0 allows no header.
+        if self._chat_flag(chat_id or "", "stream_card_header", getattr(self, "_stream_card_header", True)):
+            card["header"] = {
+                "title": {"tag": "plain_text", "content": self._stream_card_title_for(chat_id)},
+                "template": "blue",
+            }
         return json.dumps(card, ensure_ascii=False)
 
     async def _create_stream_card_entity(
@@ -5274,13 +5282,14 @@ def _apply_yaml_config(yaml_cfg: dict, feishu_cfg: dict) -> dict | None:
         ("stream_card", "FEISHU_STREAM_CARD", "lower"),
         ("stream_card_in_thread", "FEISHU_STREAM_CARD_IN_THREAD", "lower"),
         ("stream_card_title", "FEISHU_STREAM_CARD_TITLE", "str"),
+        ("stream_card_header", "FEISHU_STREAM_CARD_HEADER", "lower"),
     ))
     if not seeded:
         return None
     out: dict = {}
     if "allow_bots" in seeded:
         out["allow_bots"] = str(seeded["allow_bots"]).lower()
-    for key in ("stream_card", "stream_card_in_thread", "stream_card_title"):
+    for key in ("stream_card", "stream_card_in_thread", "stream_card_title", "stream_card_header"):
         if key in seeded:
             out[key] = seeded[key]
     return out or None
