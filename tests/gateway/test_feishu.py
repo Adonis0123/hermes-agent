@@ -943,6 +943,54 @@ class TestAdapterBehavior(unittest.TestCase):
         # Reply anchors / slash-command thread checks read source.message_id, not event.message_id.
         self.assertEqual(event.source.message_id, "om_text")
 
+    @patch.dict(os.environ, {}, clear=True)
+    def test_sender_name_override_replaces_profile_name_without_api_call(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={"sender_name_overrides": {"ou_owner": "  adonis  ", "ou_blank": "  "}}))
+        adapter._resolve_sender_name_from_api = AsyncMock(return_value="黄志华")
+        sender_id = SimpleNamespace(open_id="ou_owner", user_id="u_owner", union_id="on_owner")
+
+        profile = asyncio.run(adapter._resolve_sender_profile(sender_id, chat_id="oc_chat"))
+
+        self.assertEqual(profile, {"user_id": "u_owner", "user_name": "adonis", "user_id_alt": "on_owner"})
+        adapter._resolve_sender_name_from_api.assert_not_awaited()
+        self.assertNotIn("ou_blank", adapter._sender_name_overrides)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_sender_name_override_miss_falls_back_to_api_name(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig(extra={"sender_name_overrides": {"ou_owner": "adonis", "ou_blank": ""}}))
+        adapter._resolve_sender_name_from_api = AsyncMock(return_value="张三")
+
+        for open_id in ("ou_other", "ou_blank"):
+            profile = asyncio.run(
+                adapter._resolve_sender_profile(SimpleNamespace(open_id=open_id, user_id=None, union_id=None), chat_id="oc_chat")
+            )
+            self.assertEqual(profile["user_name"], "张三")
+            self.assertEqual(profile["user_id"], open_id)
+        self.assertEqual(adapter._resolve_sender_name_from_api.await_count, 2)
+
+    @patch.dict(os.environ, {}, clear=True)
+    def test_sender_name_overrides_default_empty_when_unconfigured(self):
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        self.assertEqual(FeishuAdapter._load_settings({}).sender_name_overrides, {})
+        self.assertEqual(FeishuAdapter._load_settings({"sender_name_overrides": "bad"}).sender_name_overrides, {})
+        adapter = FeishuAdapter(PlatformConfig())
+        adapter._resolve_sender_name_from_api = AsyncMock(return_value="张三")
+
+        profile = asyncio.run(
+            adapter._resolve_sender_profile(SimpleNamespace(open_id="ou_owner", user_id=None, union_id=None))
+        )
+
+        self.assertEqual(profile["user_name"], "张三")
+        adapter._resolve_sender_name_from_api.assert_awaited_once_with("ou_owner", chat_id="", is_bot=False)
+
     @patch.dict(
         os.environ,
         {
