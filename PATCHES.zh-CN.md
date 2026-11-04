@@ -15,6 +15,7 @@
 | 4 | [设备码轮询遇到网络错误时重试](#4-设备码轮询遇到网络错误时重试) | CLI 认证 | 可以 |
 | 5 | [失败轮提示跟随 `display.language`](#5-失败轮提示跟随-displaylanguage) | agent + gateway 文案 | 可以 |
 | 6 | [飞书发送者显示名覆盖](#6-飞书发送者显示名覆盖) | 飞书插件 | 可以 |
+| 7 | [飞书流式卡片标题栏可关闭](#7-飞书流式卡片标题栏可关闭) | 飞书插件 | 可以 |
 
 ## 1. 跨工具轮保持同一条编辑流
 
@@ -134,6 +135,23 @@ CardKit 卡片和 `hermes feishu send` 是通用能力，可以拆成独立的�
 **文件。** `plugins/platforms/feishu/adapter.py`、`tests/gateway/test_feishu.py`
 
 **配置项。** `platforms.feishu.extra.sender_name_overrides`（dict，`open_id` -> 显示名；默认为空）。
+
+**能否提交上游？** 可以。改动小，是可选的适配器配置。
+
+## 7. 飞书流式卡片标题栏可关闭
+
+提交：`466d1532b7`。
+
+**作用。** `platforms.feishu.extra.stream_card_header`（环境变量 `FEISHU_STREAM_CARD_HEADER`，
+默认 `true`）控制 CardKit 流式卡片顶部的蓝色标题栏。设为 `false` 时，`_build_stream_card_json`
+生成的 schema 2.0 卡片 JSON 不带 `header`，创建卡片、封卡后换原生表格、重新流式前还原表格三条路径
+都不带标题栏。`group_rules.<chat_id>.stream_card_header` 可按群覆盖，未设则继承全局。
+默认值下卡片与上游加补丁 2 一致。
+
+**文件。** `plugins/platforms/feishu/adapter.py`、`tests/gateway/test_feishu_stream_card.py`
+
+**配置项。** `platforms.feishu.extra.stream_card_header`（bool，默认 `true`；可用
+`group_rules.<chat_id>.stream_card_header` 按群覆盖）。
 
 **能否提交上游？** 可以。改动小，是可选的适配器配置。
 
