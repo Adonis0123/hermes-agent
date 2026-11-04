@@ -14,6 +14,7 @@ This fork is [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-
 | 4 | [Retry device-code polls on transport errors](#4-retry-device-code-polls-on-transport-errors) | CLI auth | Yes |
 | 5 | [Failed-turn notices follow `display.language`](#5-failed-turn-notices-follow-displaylanguage) | agent + gateway copy | Yes |
 | 6 | [Feishu sender display-name overrides](#6-feishu-sender-display-name-overrides) | Feishu plugin | Yes |
+| 7 | [Optional Feishu stream card header](#7-optional-feishu-stream-card-header) | Feishu plugin | Yes |
 
 ## 1. Keep one edit stream across tool rounds
 
@@ -144,6 +145,24 @@ Outbound @-mentions are untouched.
 **Files.** `plugins/platforms/feishu/adapter.py`, `tests/gateway/test_feishu.py`
 
 **Config keys.** `platforms.feishu.extra.sender_name_overrides` (dict, `open_id` -> name; default empty).
+
+**Upstream-able?** Yes. It is a small, opt-in adapter setting.
+
+## 7. Optional Feishu stream card header
+
+Commits: `466d1532b7`.
+
+**What it does.** `platforms.feishu.extra.stream_card_header` (env `FEISHU_STREAM_CARD_HEADER`,
+default `true`) controls the blue title bar on the CardKit stream card. When `false`,
+`_build_stream_card_json` leaves `header` out of the schema 2.0 card JSON, so the creating send,
+the finalize native-table swap and the table restore before re-streaming all build the card without
+it. `group_rules.<chat_id>.stream_card_header` overrides per chat; unset inherits the global value.
+With the default the card is identical to upstream plus patch 2.
+
+**Files.** `plugins/platforms/feishu/adapter.py`, `tests/gateway/test_feishu_stream_card.py`
+
+**Config keys.** `platforms.feishu.extra.stream_card_header` (bool, default `true`; per-chat override
+via `group_rules.<chat_id>.stream_card_header`).
 
 **Upstream-able?** Yes. It is a small, opt-in adapter setting.
 
