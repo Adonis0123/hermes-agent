@@ -13,6 +13,7 @@ This fork is [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-
 | 3 | [Owner tips and a short model line on `/new`](#3-owner-tips-and-a-short-model-line-on-new) | gateway + CLI config | Partly |
 | 4 | [Retry device-code polls on transport errors](#4-retry-device-code-polls-on-transport-errors) | CLI auth | Yes |
 | 5 | [Failed-turn notices follow `display.language`](#5-failed-turn-notices-follow-displaylanguage) | agent + gateway copy | Yes |
+| 6 | [Feishu sender display-name overrides](#6-feishu-sender-display-name-overrides) | Feishu plugin | Yes |
 
 ## 1. Keep one edit stream across tool rounds
 
@@ -129,6 +130,22 @@ constants and `failed_turn_notice(turn_messages)` stay compatible; it takes an o
 
 **Upstream-able?** Yes. It is a small i18n extension; upstream would likely want the copy moved into
 `locales/*.yaml`.
+
+## 6. Feishu sender display-name overrides
+
+Commits: `7c03fb094f`.
+
+**What it does.** `platforms.feishu.extra.sender_name_overrides` maps a sender `open_id` to the
+display name used for inbound `SessionSource.user_name` (the `[name] message` prefix the model sees).
+On a hit, `_resolve_sender_profile` uses the override and skips the chat member-list lookup; on a
+miss it behaves exactly as upstream. Keys and values are stripped; blank entries count as unset.
+Outbound @-mentions are untouched.
+
+**Files.** `plugins/platforms/feishu/adapter.py`, `tests/gateway/test_feishu.py`
+
+**Config keys.** `platforms.feishu.extra.sender_name_overrides` (dict, `open_id` -> name; default empty).
+
+**Upstream-able?** Yes. It is a small, opt-in adapter setting.
 
 ## Sync procedure
 
