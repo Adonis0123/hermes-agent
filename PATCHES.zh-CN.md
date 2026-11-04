@@ -14,6 +14,7 @@
 | 3 | [`/new` 自定义提示语和精简模型行](#3-new-自定义提示语和精简模型行) | gateway + CLI 配置 | 部分可以 |
 | 4 | [设备码轮询遇到网络错误时重试](#4-设备码轮询遇到网络错误时重试) | CLI 认证 | 可以 |
 | 5 | [失败轮提示跟随 `display.language`](#5-失败轮提示跟随-displaylanguage) | agent + gateway 文案 | 可以 |
+| 6 | [飞书发送者显示名覆盖](#6-飞书发送者显示名覆盖) | 飞书插件 | 可以 |
 
 ## 1. 跨工具轮保持同一条编辑流
 
@@ -120,6 +121,21 @@ CardKit 卡片和 `hermes feishu send` 是通用能力，可以拆成独立的�
 **配置项。** 无新增，读取 `display.language`。
 
 **能否提交上游？** 可以。改动小，属于 i18n 扩展；上游可能希望把文案挪进 `locales/*.yaml`。
+
+## 6. 飞书发送者显示名覆盖
+
+提交：`7c03fb094f`。
+
+**作用。** `platforms.feishu.extra.sender_name_overrides` 把发送者 `open_id` 映射到入站
+`SessionSource.user_name` 用的显示名（即模型看到的 `[名字] 消息` 前缀）。命中时
+`_resolve_sender_profile` 直接用覆盖名，不查群成员列表；未命中与上游一致。键和值都做 strip，
+空值视为未配置。出站 @ 不受影响。
+
+**文件。** `plugins/platforms/feishu/adapter.py`、`tests/gateway/test_feishu.py`
+
+**配置项。** `platforms.feishu.extra.sender_name_overrides`（dict，`open_id` -> 显示名；默认为空）。
+
+**能否提交上游？** 可以。改动小，是可选的适配器配置。
 
 ## 同步流程
 
