@@ -366,6 +366,8 @@ class FeishuAdapterSettings:
     stream_card_title: str = _DEFAULT_STREAM_CARD_TITLE
     auto_thread_enabled: bool = True
     route_inbound_reactions: bool = False
+    # open_id -> display name; replaces the member-list profile name for inbound user_name only.
+    sender_name_overrides: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1536,6 +1538,13 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
         def _secret(name: str, default: str = "") -> str:
             return _get_scoped_secret(name, default).strip()
 
+        def _sender_name_overrides(raw: Any) -> dict[str, str]:
+            # Blank keys/values count as unset so a stray "" never blanks out a real profile name.
+            if not isinstance(raw, dict):
+                return {}
+            pairs = ((str(k).strip(), str(v).strip()) for k, v in raw.items() if v is not None)
+            return {k: v for k, v in pairs if k and v}
+
         def _extra_or_secret(key: str, env: str, default: str = "") -> str:
             return str(_shared_extra_or_secret(extra, key, env, default)).strip()
 
@@ -1619,6 +1628,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
             route_inbound_reactions=_to_boolean(
                 extra.get("route_inbound_reactions", _get_scoped_secret("FEISHU_ROUTE_INBOUND_REACTIONS", str(_DEFAULT_ROUTE_INBOUND_REACTIONS).lower()))
             ),
+            sender_name_overrides=_sender_name_overrides(extra.get("sender_name_overrides")),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -3565,7 +3575,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, BasePlatformAdapter):
         open_id = getattr(sender_id, "open_id", None) or None
         user_id = getattr(sender_id, "user_id", None) or None
         union_id = getattr(sender_id, "union_id", None) or None
-        display_name = await self._resolve_sender_name_from_api(open_id, chat_id=chat_id, is_bot=is_bot)
+        override = getattr(self, "_sender_name_overrides", {}).get(open_id.strip()) if open_id else None
+        display_name = override or await self._resolve_sender_name_from_api(open_id, chat_id=chat_id, is_bot=is_bot)
         return {"user_id": user_id or open_id, "user_name": display_name, "user_id_alt": union_id}
 
     def _get_cached_sender_name(self, sender_id: Optional[str]) -> Optional[str]:
