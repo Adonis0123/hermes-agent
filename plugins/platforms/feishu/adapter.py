@@ -2468,7 +2468,7 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
 
         Approval/update-prompt/clarify/picker buttons return the settled card inline (the only
         reliable way to sync all clients) and schedule any async resolution; other clicks are routed
-        as synthetic commands via ``_handle_card_action_event``.
+        as synthetic commands via ``_handle_card_action_event`` and acknowledged with a toast.
         """
         loop = self._loop
         if not self._loop_accepts_callbacks(loop):
@@ -2480,8 +2480,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         for key, handler in self._CARD_ACTION_ROUTES if isinstance(action_value, dict) else ():
             if action_value.get(key):
                 return getattr(self, handler)(event=event, action_value=action_value, loop=loop)
-        self._submit_on_loop(loop, self._handle_card_action_event(data))
-        return self._card_response()
+        queued = self._submit_on_loop(loop, self._handle_card_action_event(data))  # settles the card seconds later
+        return self._card_toast(t("platform.feishu.card_action.received"), "info") if queued else self._card_response()
 
     @staticmethod
     def _loop_accepts_callbacks(loop: Any) -> bool:
@@ -2513,10 +2513,10 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
             response.card = card
         return response
 
-    def _card_toast(self, text: str) -> Any:
+    def _card_toast(self, text: str, kind: str = "warning") -> Any:
         """Card-callback response that leaves the card as is and shows *text* to the clicker only."""
         if (response := self._card_response()) is not None and (toast := CallBackToast) is not None:  # health: allow F821 -- bound with the other SDK names by _load_lark_oapi
-            response.toast, response.toast.type, response.toast.content = toast(), "warning", text
+            response.toast, response.toast.type, response.toast.content = toast(), kind, text
         return response
 
     def _handle_approval_card_action(self, *, event: Any, action_value: dict[str, Any], loop: Any) -> Any:
@@ -4021,13 +4021,11 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         Feishu rejects ``receive_id_type=thread_id`` for interactive cards
         with 99992402. Topics must reply against an ``om_*`` id.
         """
-        if reply_to and str(reply_to).startswith("om_"):
-            return str(reply_to)
         meta = metadata or {}
-        for candidate in (meta.get("reply_to_message_id"), meta.get("thread_id")):
+        for candidate in (reply_to, meta.get("reply_to_message_id"), meta.get("thread_id")):
             if candidate and str(candidate).startswith("om_"):
                 return str(candidate)
-        return reply_to or None
+        return None
 
     @staticmethod
     def _stream_card_id_from_message_id(message_id: str) -> Optional[str]:
@@ -4465,6 +4463,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
     ) -> Any:
         thread_id = (metadata or {}).get("thread_id")
+        # A card click's ``c-…`` token (its dedup id, handed back as reply_to) is no message id: 99992354.
+        reply_to = reply_to if str(reply_to or "").startswith("om_") else None
         effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
         # Owner overlay: an ``om_`` message id as the thread target must go through
         # message.reply(reply_in_thread=True). Feishu create only accepts ``omt_`` for

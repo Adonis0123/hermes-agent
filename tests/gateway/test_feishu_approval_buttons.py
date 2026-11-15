@@ -1,5 +1,6 @@
 """Tests for Feishu interactive card approval buttons."""
 
+import asyncio
 import importlib.util
 import json
 import sys
@@ -269,6 +270,37 @@ class TestNonApprovalCardAction:
         mock_handle.assert_called_once()
         event = mock_handle.call_args[0][0]
         assert "/card button" in event.text
+
+    def test_click_is_acknowledged_with_a_toast_and_still_forwarded(self, _patch_callback_card_types, monkeypatch):
+        """A plugin takes seconds to settle its card: the clicker is told right away that the click
+        landed, unless it could not be queued."""
+        monkeypatch.setattr(feishu_module, "CallBackToast", SimpleNamespace, raising=False)
+        adapter = _make_adapter()
+        adapter._loop = MagicMock(is_closed=MagicMock(return_value=False))
+        data = _make_card_action_data({"custom_action": "something_else"}, token="tok_normal")
+
+        def _run_submitted(coro, _loop):
+            asyncio.run(coro)
+            return SimpleNamespace(add_done_callback=lambda *_a, **_k: None)
+
+        with (
+            patch.object(
+                adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                return_value={"user_id": "ou_u", "user_name": "Dave", "user_id_alt": None},
+            ),
+            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+            patch.object(adapter, "_handle_message_with_guards", new_callable=AsyncMock) as mock_handle,
+        ):
+            with patch("asyncio.run_coroutine_threadsafe", side_effect=_run_submitted):
+                response = adapter._on_card_action_trigger(data)
+            with patch("asyncio.run_coroutine_threadsafe", side_effect=RuntimeError("loop closed")):
+                not_queued = adapter._on_card_action_trigger(data)
+
+        assert "/card button" in mock_handle.call_args[0][0].text
+        assert response.card is None and response.toast.type == "info"
+        assert response.toast.content == t("platform.feishu.card_action.received") != "platform.feishu.card_action.received"
+        assert not_queued.card is None and not hasattr(not_queued, "toast")
+        mock_handle.assert_called_once()
 
 
 # ===========================================================================
