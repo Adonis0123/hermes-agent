@@ -15,6 +15,7 @@ This fork is [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-
 | 5 | [Failed-turn notices follow `display.language`](#5-failed-turn-notices-follow-displaylanguage) | agent + gateway copy | Yes |
 | 6 | [Feishu sender display-name overrides](#6-feishu-sender-display-name-overrides) | Feishu plugin | Yes |
 | 7 | [Optional Feishu stream card header](#7-optional-feishu-stream-card-header) | Feishu plugin | Yes |
+| 8 | [Feishu card clicks get a toast and a delivered confirmation](#8-feishu-card-clicks-get-a-toast-and-a-delivered-confirmation) | Feishu plugin | Yes |
 
 ## 1. Keep one edit stream across tool rounds
 
@@ -166,6 +167,34 @@ via `group_rules.<chat_id>.stream_card_header`).
 
 **Upstream-able?** Yes. It is a small, opt-in adapter setting.
 
+## 8. Feishu card clicks get a toast and a delivered confirmation
+
+Commits: `6ade334c73`.
+
+**What it does.** A card button click is routed as a synthetic event whose `message_id` is the
+callback token (`c-…`, kept for dedup), and the gateway hands that id back as `reply_to`. Feishu's
+reply API rejects it (`99992354 not a valid {open_message_id}`), so the confirmation of every click
+was lost on the stream card and on the post/text fallback. `_send_raw_message` now replies only to
+an `om_` message id; any other `reply_to` is dropped, so the message is posted to the chat (or
+anchored on an `om_` `reply_to_message_id` / `thread_id` from the metadata, as before).
+`_card_reply_anchor` no longer passes a non-`om_` id through. Replies to `om_` ids are unchanged.
+
+A plugin card takes seconds to settle after a click (clicks queue behind the chat's turn), and the
+callback used to answer with nothing. `_on_card_action_trigger` now answers a click it forwards as a
+synthetic `/card` command with an `info` toast, `platform.feishu.card_action.received` ("Got it,
+working on it…"), seen by the clicker only. A click that could not be queued, and the approval /
+update-prompt / clarify / picker buttons, answer as before. `_card_toast` takes the toast type
+(default `warning`).
+
+**Files.** `plugins/platforms/feishu/adapter.py`, `locales/*.yaml` (the 17 bundled languages),
+`tests/gateway/test_feishu_reply_target.py`, `tests/gateway/test_feishu_approval_buttons.py`
+
+**Config keys.** None. The toast text is the locale key above, so a user overlay
+`<home>/locales/<lang>.yaml` can reword it.
+
+**Upstream-able?** Yes. The post/text half is an upstream bug and the toast is generic; the stream
+card half needs patch 2.
+
 ## Sync procedure
 
 Run in the fork checkout, with `origin` = this repo and `upstream` = NousResearch
@@ -185,7 +214,8 @@ scripts/run_tests.sh tests/gateway/test_feishu_overlay_contracts.py \
   tests/gateway/test_feishu_stream_card.py tests/gateway/test_reset_display_tips.py \
   tests/gateway/test_session_info.py tests/hermes_cli/test_display_tips.py \
   tests/gateway/test_feishu_native_tables.py tests/agent/test_turn_failure_copy_language.py \
-  tests/hermes_cli/test_auth_nous_provider.py -q
+  tests/hermes_cli/test_auth_nous_provider.py tests/gateway/test_feishu_reply_target.py \
+  tests/gateway/test_feishu_approval_buttons.py tests/agent/test_i18n.py -q
 hermes feishu send --help >/dev/null   # plugin CLI that scripts post through
 BASE=$(git describe --tags --abbrev=0 upstream-main)   # e.g. v2026.9.21
 TAG="$BASE-adonis.<n>"; echo "$TAG"   # n = 1, 2, ... per sync on the same upstream tag

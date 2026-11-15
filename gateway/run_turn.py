@@ -370,28 +370,17 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             return self._format_session_info(source)
 
     def _format_session_info(self, source: Optional[SessionSource] = None) -> str:
-        """Model / provider / context-length / endpoint block so users can spot bad context detection.
-        With ``source``, the chat's ``channel_overrides`` route is reported (what its turn runs)."""
+        """Model line for the reset notice. Provider and context length stay on /status.
+        With ``source``, the chat's ``channel_overrides`` route picks the model."""
         from gateway.run import _resolve_gateway_model_context
         from gateway.session_info_route import channel_override_route
         model, route, force_provider = channel_override_route(source and self._serving_channel_config(source), source)
         resolved = _resolve_gateway_model_context(model=model, route=route)
-        if force_provider:
-            resolved = dataclasses.replace(resolved, provider=force_provider)
-        context_length = resolved.context_length
-        ctx_source = {
-            "config": "config",
-            "default": "fallback, not a detected limit — set model.context_length in config to override",
-        }.get(resolved.context_source, "detected")
-        ctx_display = (
-            f"{context_length / 1_000_000:.1f}M" if context_length >= 1_000_000
-            else f"{context_length // 1_000}K" if context_length >= 1_000 else str(context_length)
-        )
-        lines = [
-            t("gateway.session.info_model", model=resolved.model),
-            t("gateway.session.info_provider", provider=resolved.provider or "openrouter"),
-            t("gateway.session.info_context", tokens=ctx_display, source=ctx_source),
-        ]
+        shown_provider = force_provider or (route or {}).get("provider")
+        model_line = resolved.model
+        if shown_provider and shown_provider not in model_line:
+            model_line = f"{model_line} ({shown_provider})"
+        lines = [t("gateway.session.info_model", model=model_line)]
         if (resolved.provider or "") == "moa":
             # The preset name hides who pays: the aggregator runs every tool-loop step (#112359).
             from hermes_cli.config import load_config
