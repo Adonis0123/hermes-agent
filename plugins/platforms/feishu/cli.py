@@ -57,7 +57,7 @@ def _resolve(target: str) -> tuple[object, str, str | None]:
         if not home or not home.chat_id:
             raise ValueError("no chat_id given and FEISHU_HOME_CHANNEL is not set")
         return pconfig, home.chat_id, None
-    from tools.send_message_targets import resolve_send_target
+    from gateway.outbound.targets import resolve_send_target
     chat_id, thread_id, err = resolve_send_target("feishu", ref.strip(), pass_unresolved_references=True)
     if err or not chat_id:
         raise ValueError(err or f"cannot resolve target {target!r}")
