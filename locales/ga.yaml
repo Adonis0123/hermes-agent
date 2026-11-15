@@ -1406,6 +1406,8 @@ platform:
       unauthorized: "Ní féidir ach le húsáideoir Matrix údaraithe na rialtáin seo a úsáid."
       not_requester: "Ní féidir ach leis an úsáideoir a d'iarr an gníomh seo na rialtáin seo a úsáid."
   feishu:
+    card_action:
+      received: "Faighte, á phróiseáil…"
     clarify:
       title: "Tá d'ionchur de dhíth ar Hermes"
       other: "✏️ Eile (clóscríobh freagra)"
