@@ -1409,6 +1409,8 @@ platform:
       unauthorized: "Solo un utente Matrix autorizzato può usare questi controlli."
       not_requester: "Solo l'utente che ha richiesto questa azione può usare questi controlli."
   feishu:
+    card_action:
+      received: "Ricevuto, elaborazione in corso…"
     clarify:
       title: "Hermes ha bisogno del tuo contributo"
       other: "✏️ Altro (digita)"
