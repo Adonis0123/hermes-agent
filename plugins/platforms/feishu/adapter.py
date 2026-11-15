@@ -3697,6 +3697,8 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         self, *, chat_id: str, msg_type: str, payload: str, reply_to: Optional[str], metadata: Optional[dict[str, Any]],
     ) -> Any:
         thread_id = (metadata or {}).get("thread_id")
+        # A card click's ``c-…`` token (its dedup id, handed back as reply_to) is no message id: 99992354.
+        reply_to = reply_to if str(reply_to or "").startswith("om_") else None
         effective_reply_to = reply_to or ((metadata or {}).get("reply_to_message_id") if thread_id else None)
         if effective_reply_to:
             body = self._build_reply_message_body(
