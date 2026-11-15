@@ -16,6 +16,7 @@
 | 5 | [失败轮提示跟随 `display.language`](#5-失败轮提示跟随-displaylanguage) | agent + gateway 文案 | 可以 |
 | 6 | [飞书发送者显示名覆盖](#6-飞书发送者显示名覆盖) | 飞书插件 | 可以 |
 | 7 | [飞书流式卡片标题栏可关闭](#7-飞书流式卡片标题栏可关闭) | 飞书插件 | 可以 |
+| 8 | [飞书卡片按钮点击后有提示且确认能发到群里](#8-飞书卡片按钮点击后有提示且确认能发到群里) | 飞书插件 | 可以 |
 
 ## 1. 跨工具轮保持同一条编辑流
 
@@ -155,6 +156,31 @@ CardKit 卡片和 `hermes feishu send` 是通用能力，可以拆成独立的�
 
 **能否提交上游？** 可以。改动小，是可选的适配器配置。
 
+## 8. 飞书卡片按钮点击后有提示且确认能发到群里
+
+提交：`6ade334c73`。
+
+**作用。** 卡片按钮点击会被包成一条合成事件，它的 `message_id` 是回调 token（`c-…`，去重靠它），
+网关再把这个 id 当 `reply_to` 传回适配器。飞书回复接口不认它
+（`99992354 not a valid {open_message_id}`），所以每次点击后的确认都发不出去，流式卡片和
+post/text 回退两条路径都一样。现在 `_send_raw_message` 只回复 `om_` 开头的消息 id；其他
+`reply_to` 一律丢弃，消息改发到群里（metadata 里有 `om_` 的 `reply_to_message_id` / `thread_id`
+时照旧用它们）。`_card_reply_anchor` 不再把非 `om_` 的 id 原样放过。回复 `om_` id 的行为不变。
+
+插件卡片在点击后要过几秒才改完（点击排在该群当前那轮对话后面），回调原先什么都不回。现在
+`_on_card_action_trigger` 对转成合成 `/card` 命令的点击回一个 `info` 类型的 toast，文案是
+`platform.feishu.card_action.received`（「已收到，处理中…」），只有点击人看得到。没排上队的点击，
+以及审批、更新确认、clarify、picker 按钮，应答不变。`_card_toast` 多了一个 toast 类型参数
+（默认 `warning`）。
+
+**文件。** `plugins/platforms/feishu/adapter.py`、`locales/*.yaml`（内置的 17 种语言）、
+`tests/gateway/test_feishu_reply_target.py`、`tests/gateway/test_feishu_approval_buttons.py`
+
+**配置项。** 无。toast 文案是上面那个 locale 键，可在用户 overlay `<home>/locales/<lang>.yaml`
+里改写。
+
+**能否提交上游？** 可以。post/text 那一半是上游 bug，toast 是通用改进；流式卡片那一半依赖补丁 2。
+
 ## 同步流程
 
 在 fork 的本地仓库里执行，`origin` = 本仓库，`upstream` = NousResearch（按你的 clone 调整 remote 名）。
@@ -173,7 +199,8 @@ scripts/run_tests.sh tests/gateway/test_feishu_overlay_contracts.py \
   tests/gateway/test_feishu_stream_card.py tests/gateway/test_reset_display_tips.py \
   tests/gateway/test_session_info.py tests/hermes_cli/test_display_tips.py \
   tests/gateway/test_feishu_native_tables.py tests/agent/test_turn_failure_copy_language.py \
-  tests/hermes_cli/test_auth_nous_provider.py -q
+  tests/hermes_cli/test_auth_nous_provider.py tests/gateway/test_feishu_reply_target.py \
+  tests/gateway/test_feishu_approval_buttons.py tests/agent/test_i18n.py -q
 hermes feishu send --help >/dev/null   # 脚本靠这个插件 CLI 发消息
 BASE=$(git describe --tags --abbrev=0 upstream-main)   # 例如 v2026.9.21
 TAG="$BASE-adonis.<n>"; echo "$TAG"   # 同一上游 tag 下每次同步 n = 1, 2, ...
