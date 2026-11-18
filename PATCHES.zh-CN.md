@@ -50,6 +50,8 @@
   文本会像 `hermes send` 一样同步进目标会话。
 - `config.yaml` 里的飞书配置项可以放在 `platforms.feishu` 或 `platforms.feishu.extra` 下。
 - 流式卡片收尾时，markdown 表格渲染成 CardKit 原生表格。
+- 飞书会把列表后空一行的段落渲染进列表最后一项。流式卡片收尾时，列表结束处的空行（下一个非空行
+  既不是列表项也不是缩进续行）也会切开 markdown 元素；没有表格的卡片也会为此重建一次。代码块和表格不变。
 - 话题里的追问如果 @ 的是别人而不是机器人，不会被接收，agent 不会去执行发给同事的话。发送人名字从群成员接口取。
 - 话题里不点引用直接回复时，飞书给的 `parent_id` 等于 `root_id`。agent 看到的引用内容会标成「话题首条」而不是引用，agent 按话题里最新的提问作答。
 
@@ -167,14 +169,33 @@ post/text 回退两条路径都一样。现在 `_send_raw_message` 只回复 `om
 `reply_to` 一律丢弃，消息改发到群里（metadata 里有 `om_` 的 `reply_to_message_id` / `thread_id`
 时照旧用它们）。`_card_reply_anchor` 不再把非 `om_` 的 id 原样放过。回复 `om_` id 的行为不变。
 
-插件卡片在点击后要过几秒才改完（点击排在该群当前那轮对话后面），回调原先什么都不回。现在
-`_on_card_action_trigger` 对转成合成 `/card` 命令的点击回一个 `info` 类型的 toast，文案是
-`platform.feishu.card_action.received`（「已收到，处理中…」），只有点击人看得到。没排上队的点击，
-以及审批、更新确认、clarify、picker 按钮，应答不变。`_card_toast` 多了一个 toast 类型参数
-（默认 `warning`）。
+插件卡片在点击后要过一会儿才改完，回调原先什么都不回。现在 `_on_card_action_trigger` 对转成
+合成 `/card` 命令的点击回一个 `info` 类型的 toast，文案是 `platform.feishu.card_action.received`
+（「已收到，处理中…」），只有点击人看得到。没能调度的点击，以及审批、更新确认、clarify、picker
+按钮，应答不变。`_card_toast` 多了一个 toast 类型参数（默认 `warning`）。
 
-**文件。** `plugins/platforms/feishu/adapter.py`、`locales/*.yaml`（内置的 17 种语言）、
-`tests/gateway/test_feishu_reply_target.py`、`tests/gateway/test_feishu_approval_buttons.py`
+插件卡片的点击不再排队。合成的 `/card` 命令原先走该群的受控管线：群里有一轮 agent 在跑，或上一次
+点击还在处理时，点击要等那一轮结束，点击人收到「已排队至下一回合」。现在只要点击的命令是插件注册的，
+`_dispatch_card_plugin_command` 就跳过按群的锁和会话占位，给事件打上 `_hermes_plugin_command_inline`
+标记，像 bypass 命令一样内联派发（`_dispatch_inline_reply`）。runner 的 `_handle_message` 在准入
+（授权、`pre_gateway_dispatch`、estop）之后认这个标记：`_hm_dispatch_inline_plugin_command` 套用
+空闲路径的斜杠命令权限和命令 hook，经 `_hm_dispatch_quick_and_plugin_commands`（含 drain 闸和快捷命令）跑插件（带插件会话上下文），
+然后直接返回。它不会排在 agent 那一轮后面，不会打断它，也不会新开一轮，handler 抛错时也一样。
+同时点的几次各自执行。handler 返回的非空文本按上面的回复锚点规则发到群里。重复 token 照旧丢弃。
+内置命令、没注册的命令、打字消息和其他平台仍走受控管线。
+
+卡片点击和表情回应走上游的 `FeishuSyntheticEventsMixin`（`adapter_synthetic_events.py`），路由前都要
+先过 `_admit_synthetic`（和文字消息同一道准入检查），快通道在准入之后才开始。`adapter.py` 里原先的
+`_handle_reaction_event`、`_handle_card_action_event`、`_dispatch_synthetic_event` 旧副本盖住了 mixin，
+跳过了这道检查，现已删掉。旧副本里的叠层改动搬进了 mixin：`card_click` 快通道、用群成员接口取
+发送人名字（`_resolve_sender_profile(..., chat_id=)`）、补丁 2 的表情回应开关
+（`route_inbound_reactions` 和静默确认表情），后者在准入前丢弃回应。
+`tests/gateway/test_feishu_bot_admission.py` 按这些改动调整了上游用例的输入：假的发送人查询接受
+`chat_id`，表情回应的 helper 打开转发、改用非确认类表情。
+
+**文件。** `plugins/platforms/feishu/adapter.py`、`plugins/platforms/feishu/adapter_synthetic_events.py`、
+`gateway/run_inbound.py`、`locales/*.yaml`（内置的 17 种语言）、`tests/gateway/test_feishu_reply_target.py`、
+`tests/gateway/test_feishu_approval_buttons.py`、`tests/gateway/test_feishu_bot_admission.py`
 
 **配置项。** 无。toast 文案是上面那个 locale 键，可在用户 overlay `<home>/locales/<lang>.yaml`
 里改写。

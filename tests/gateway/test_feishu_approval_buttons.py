@@ -276,6 +276,7 @@ class TestNonApprovalCardAction:
         landed, unless it could not be queued."""
         monkeypatch.setattr(feishu_module, "CallBackToast", SimpleNamespace, raising=False)
         adapter = _make_adapter()
+        adapter._allowed_group_users = frozenset({"ou_user1"})  # clicker passes the group allowlist
         adapter._loop = MagicMock(is_closed=MagicMock(return_value=False))
         data = _make_card_action_data({"custom_action": "something_else"}, token="tok_normal")
 
@@ -723,3 +724,200 @@ def test_resolved_card_keeps_the_request(_patch_callback_card_types):
         card = adapter._on_card_action_trigger(data).card.data
     content = card["elements"][0]["content"]
     assert "rm -rf ./build" in content and "dangerous deletion" in content and "Bob" in content
+
+
+# ===========================================================================
+# Plugin card clicks run inline: never queued behind, interrupting or starting a turn
+# ===========================================================================
+
+# Imported at collection: importing gateway.run inside a test trips the real-home I/O guard
+# (hermes_bootstrap probes the checkout's parent for a payload manifest).
+from gateway.run import GatewayRunner
+
+
+def _fast_lane_runner(*, authorized: bool = True):
+    """A bare GatewayRunner whose chat has an agent turn running; the running-turn path, the
+    pending queue and a new agent turn are recorders the tests assert stay untouched."""
+    from datetime import datetime
+
+    from gateway.config import GatewayConfig, Platform
+    from gateway.session import SessionEntry
+
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(platforms={Platform.FEISHU: PlatformConfig(enabled=True)})
+    runner.adapters = {}
+    runner.hooks = SimpleNamespace(emit=AsyncMock(), emit_collect=AsyncMock(return_value=[]), loaded_hooks=False)
+    runner.session_store = MagicMock()
+    runner.session_store.get_or_create_session.return_value = SessionEntry(
+        session_key="k", session_id="sess-1", created_at=datetime.now(), updated_at=datetime.now(),
+        platform=Platform.FEISHU, chat_type="group")
+    runner._running_agents = {}
+    runner._pending_messages = {}
+    runner._session_db = None
+    runner._is_user_authorized = lambda _source: authorized
+    runner._set_session_env = lambda _context: None
+    runner._is_session_running = lambda _key: True  # the chat's agent turn is running
+    runner._hm_handle_running_session_message = AsyncMock(return_value=None)
+    runner._handle_message_with_agent = AsyncMock(return_value=None)
+    runner._queue_or_replace_pending_event = MagicMock()
+    return runner
+
+
+def _assert_no_turn_touched(runner):
+    runner._hm_handle_running_session_message.assert_not_called()  # not queued, steered or interrupting
+    runner._queue_or_replace_pending_event.assert_not_called()
+    runner._handle_message_with_agent.assert_not_called()  # no agent turn started
+
+
+class TestPluginCardClickFastLane:
+    """A click whose /card command a plugin registered runs now, even while the chat is busy."""
+
+    @staticmethod
+    def _busy_adapter(runner):
+        adapter = _make_adapter()
+        adapter._allowed_group_users = frozenset({"ou_user1"})
+        adapter.set_message_handler(runner._handle_message)
+        adapter.set_busy_session_handler(AsyncMock(return_value=True))
+        adapter._handle_message_while_active = AsyncMock()
+        adapter._send_with_retry = AsyncMock(return_value=SimpleNamespace(success=True, message_id="om_reply"))
+        # Every session of this adapter reads as busy (a turn or an earlier click holds the guard).
+        busy_guard = asyncio.Event()
+        busy_guard.set()
+        adapter._active_sessions = MagicMock(__contains__=lambda _self, _key: True,
+                                             __getitem__=lambda _self, _key: busy_guard)
+        return adapter
+
+    @staticmethod
+    def _patched(adapter):
+        return (
+            patch.object(adapter, "_resolve_sender_profile", new_callable=AsyncMock,
+                         return_value={"user_id": "ou_user1", "user_name": "Dave", "user_id_alt": None}),
+            patch.object(adapter, "get_chat_info", new_callable=AsyncMock, return_value={"name": "Test Chat"}),
+        )
+
+    @staticmethod
+    def _register(monkeypatch, handler):
+        from hermes_cli import plugins as plugins_mod
+        monkeypatch.setattr(plugins_mod, "get_plugin_command_handler",
+                            lambda name: handler if name == "card" else None)
+
+    @pytest.mark.asyncio
+    async def test_busy_chat_click_runs_the_plugin_now_and_replies(self, monkeypatch):
+        seen = []
+
+        def handler(raw_args, *, source, session_id, session_key, platform):
+            seen.append((raw_args, source.chat_id, session_key, platform))
+            return "已改成「已解决」"
+
+        self._register(monkeypatch, handler)
+        runner = _fast_lane_runner()
+        adapter = self._busy_adapter(runner)
+        data = _make_card_action_data({"wa": "set_status", "id": 7}, token="c-tok1")
+        profile, chat = self._patched(adapter)
+        with profile, chat, patch.object(adapter, "_handle_message_with_guards",
+                                         new_callable=AsyncMock) as guarded:
+            await adapter._handle_card_action_event(data)
+
+        assert len(seen) == 1
+        raw_args, chat_id, session_key, platform = seen[0]
+        assert (raw_args, chat_id, platform) == ('button {"wa": "set_status", "id": 7}', "oc_12345", "feishu")
+        assert session_key.endswith("oc_12345")  # plugin session context names this chat's session
+        guarded.assert_not_called()  # skipped the per-chat lock and the session guard
+        adapter._handle_message_while_active.assert_not_called()  # no busy ack, no pending slot
+        adapter._busy_session_handler.assert_not_called()
+        adapter._send_with_retry.assert_awaited_once()  # the reply only: no "queued" ack
+        sent = adapter._send_with_retry.call_args.kwargs
+        assert sent["chat_id"] == "oc_12345" and sent["content"] == "已改成「已解决」"
+        assert adapter._pending_messages == {} and runner._pending_messages == {}
+        _assert_no_turn_touched(runner)
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_clicker_does_not_run_the_plugin(self, monkeypatch):
+        handler = MagicMock(return_value="ran")
+        self._register(monkeypatch, handler)
+        runner = _fast_lane_runner(authorized=False)
+        adapter = self._busy_adapter(runner)
+        profile, chat = self._patched(adapter)
+        with profile, chat:
+            await adapter._handle_card_action_event(_make_card_action_data({"wa": "x"}, token="c-tok2"))
+        handler.assert_not_called()
+        adapter._send_with_retry.assert_not_called()
+        _assert_no_turn_touched(runner)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_token_runs_once(self, monkeypatch):
+        handler = MagicMock(return_value=None)
+        self._register(monkeypatch, handler)
+        adapter = self._busy_adapter(_fast_lane_runner())
+        data = _make_card_action_data({"wa": "x"}, token="c-dup")
+        profile, chat = self._patched(adapter)
+        with profile, chat:
+            await adapter._handle_card_action_event(data)
+            await adapter._handle_card_action_event(data)
+        handler.assert_called_once()
+        adapter._send_with_retry.assert_not_called()  # an empty reply sends nothing
+
+    @pytest.mark.asyncio
+    async def test_concurrent_clicks_each_run_without_waiting(self, monkeypatch):
+        """A second click lands while the first is still in its handler: both run, neither queues."""
+        release = asyncio.Event()
+        started = []
+
+        async def handler(raw_args, *, source, session_id, session_key, platform):
+            started.append(raw_args)
+            if len(started) == 1:
+                await release.wait()
+
+        self._register(monkeypatch, handler)
+        adapter = self._busy_adapter(_fast_lane_runner())
+        profile, chat = self._patched(adapter)
+        with profile, chat:
+            first = asyncio.create_task(adapter._handle_card_action_event(
+                _make_card_action_data({"n": 1}, token="c-a")))
+            await asyncio.sleep(0.05)
+            await asyncio.wait_for(adapter._handle_card_action_event(
+                _make_card_action_data({"n": 2}, token="c-b")), timeout=2)
+            release.set()
+            await first
+        assert len(started) == 2
+
+    @pytest.mark.asyncio
+    async def test_raising_handler_starts_no_turn(self, monkeypatch):
+        def handler(*_a, **_k):
+            raise RuntimeError("boom")
+
+        self._register(monkeypatch, handler)
+        runner = _fast_lane_runner()
+        adapter = self._busy_adapter(runner)
+        profile, chat = self._patched(adapter)
+        with profile, chat:
+            await adapter._handle_card_action_event(_make_card_action_data({"wa": "x"}, token="c-err"))
+        _assert_no_turn_touched(runner)
+        adapter._send_with_retry.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_without_a_plugin_command_the_click_keeps_the_guarded_path(self, monkeypatch):
+        self._register(monkeypatch, None)
+        adapter = self._busy_adapter(_fast_lane_runner())
+        adapter._dispatch_inline_reply = AsyncMock(side_effect=AssertionError("dispatched inline"))
+        profile, chat = self._patched(adapter)
+        with profile, chat, patch.object(adapter, "_handle_message_with_guards",
+                                         new_callable=AsyncMock) as guarded:
+            await adapter._handle_card_action_event(_make_card_action_data({"wa": "x"}, token="c-old"))
+        guarded.assert_called_once()
+        assert "/card button" in guarded.call_args[0][0].text
+
+    @pytest.mark.asyncio
+    async def test_fast_lane_runs_only_after_admission(self, monkeypatch):
+        """A clicker the chat's admission gate rejects never reaches the plugin, busy chat or not."""
+        handler = MagicMock(return_value="ran")
+        self._register(monkeypatch, handler)
+        runner = _fast_lane_runner()
+        adapter = self._busy_adapter(runner)
+        adapter._allowed_group_users = frozenset({"ou_owner"})  # ou_user1 is not on the allowlist
+        adapter._message_handler = AsyncMock(wraps=adapter._message_handler)
+        profile, chat = self._patched(adapter)
+        with profile, chat:
+            await adapter._handle_card_action_event(_make_card_action_data({"wa": "x"}, token="c-adm"))
+        adapter._message_handler.assert_not_called()
+        handler.assert_not_called()

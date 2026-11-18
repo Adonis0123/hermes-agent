@@ -224,6 +224,8 @@ _FEISHU_STREAM_CARD_MAX_CHARS = 28000  # keep under CardKit element content limi
 _FEISHU_CARD_MAX_TABLES = 5
 _MD_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$")
 _MD_TABLE_CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
+# A list item line ("- ", "* ", "+ ", "1. "); "**bold**" and "---" are not.
+_MD_LIST_ITEM_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s")
 
 # Overlay defaults (owner Feishu quiet path).
 _DEFAULT_STREAM_CARD_ENABLED = False
@@ -1408,17 +1410,36 @@ def _md_table_element(header: list[str], aligns: list[str], rows: list[list[str]
     }
 
 
+def _md_list_ends_after(lines: list[str], i: int) -> bool:
+    """True when the blank line ``lines[i]`` ends a list: the next non-blank line is neither a
+    list item nor indented continuation (a trailing blank run ends nothing)."""
+    nxt = next((line for line in lines[i + 1:] if line.strip()), None)
+    return nxt is not None and not _MD_LIST_ITEM_RE.match(nxt) and not nxt[:1].isspace()
+
+
 def _markdown_card_elements(markdown: str) -> list[dict[str, Any]]:
-    """Split card markdown into markdown + native table elements; fenced code is left alone."""
+    """Split card markdown into markdown + native table elements; fenced code is left alone.
+
+    Feishu renders a paragraph that follows a list after a blank line as part of the list's last
+    item, so a markdown element also ends at the blank line where a list ends."""
     elements: list[dict[str, Any]] = []
     buffer: list[str] = []
+
+    def flush() -> None:
+        text = "\n".join(buffer).strip("\n")
+        if text.strip():
+            elements.append({"tag": "markdown", "content": text})
+        buffer.clear()
+
     lines = markdown.split("\n")
     in_fence = False
+    in_list = False
     tables = 0
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.lstrip().startswith("```"):
+        is_fence = line.lstrip().startswith("```")
+        if is_fence:
             in_fence = not in_fence
         is_table = (
             not in_fence and tables < _FEISHU_CARD_MAX_TABLES and "|" in line
@@ -1438,19 +1459,26 @@ def _markdown_card_elements(markdown: str) -> list[dict[str, Any]]:
                     "center" if s.startswith(":") and s.endswith(":") else "right" if s.endswith(":") else "left"
                     for s in separators
                 ]
-                text = "\n".join(buffer).strip("\n")
-                if text.strip():
-                    elements.append({"tag": "markdown", "content": text})
-                buffer = []
+                flush()
                 elements.append(_md_table_element(header, aligns, rows))
                 tables += 1
+                in_list = False
                 i = j
                 continue
+        if is_fence or not in_fence:
+            if not line.strip():
+                if in_list and _md_list_ends_after(lines, i):
+                    flush()  # the blank line itself is dropped: no empty element
+                    in_list = False
+                    i += 1
+                    continue
+            elif not is_fence and _MD_LIST_ITEM_RE.match(line):
+                in_list = True
+            elif not line[:1].isspace():
+                in_list = False  # an unindented paragraph, heading or fence line ends the list
         buffer.append(line)
         i += 1
-    text = "\n".join(buffer).strip("\n")
-    if text.strip():
-        elements.append({"tag": "markdown", "content": text})
+    flush()
     return elements
 
 
@@ -2623,60 +2651,6 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         except Exception as exc:
             logger.error("Failed to resolve Feishu update prompt: %s", exc)
 
-    async def _handle_reaction_event(self, event_type: str, data: Any) -> None:
-        """Fetch the reacted-to message; if it was sent by this bot, emit a synthetic text event."""
-        if not self._client:
-            return
-        event = getattr(data, "event", None)
-        message_id = str(getattr(event, "message_id", "") or "")
-        if not message_id:
-            return
-        # Fetch the target message to verify it was sent by us and to obtain chat context.
-        try:
-            request = self._build_get_message_request(message_id)
-            response = await self._run_blocking(self._client.im.v1.message.get, request)
-            if not self._response_succeeded(response):
-                return
-            items = getattr(getattr(response, "data", None), "items", None) or []
-            msg = items[0] if items else None
-            if not msg:
-                return
-            # GET im/v1/messages reports sender.id=app_id for bot messages — peer bots share
-            # sender_type="app" with us but differ on app_id. Only route our own messages.
-            sender = getattr(msg, "sender", None)
-            if str(getattr(sender, "id", "") or "") != self._app_id:
-                return
-            chat_id = str(getattr(msg, "chat_id", "") or "")
-            chat_type_raw = str(getattr(msg, "chat_type", "p2p") or "p2p")
-            if not chat_id:
-                return
-        except Exception:
-            logger.debug("[Feishu] Failed to fetch message for reaction routing", exc_info=True)
-            return
-        user_id_obj = getattr(event, "user_id", None)
-        reaction_type_obj = getattr(event, "reaction_type", None)
-        emoji_type = str(getattr(reaction_type_obj, "emoji_type", "") or "UNKNOWN")
-        action = "added" if "created" in event_type else "removed"
-        if not getattr(self, "_route_inbound_reactions", False):
-            logger.info(
-                "[Feishu] Ignoring inbound reaction %s:%s on message %s "
-                "(route_inbound_reactions=false)",
-                action, emoji_type, message_id,
-            )
-            return
-        if emoji_type in _FEISHU_SILENT_REACTION_EMOJIS:
-            logger.info(
-                "[Feishu] Ignoring silent reaction %s:%s on message %s",
-                action, emoji_type, message_id,
-            )
-            return
-        synthetic_text = f"reaction:{action}:{emoji_type}"
-        logger.info("[Feishu] Routing reaction %s:%s on bot message %s as synthetic event", action, emoji_type, message_id)
-        await self._dispatch_synthetic_event(
-            text=synthetic_text, message_type=MessageType.TEXT, chat_id=chat_id, sender_id=user_id_obj,
-            event_chat_type=chat_type_raw, raw_message=data, message_id=message_id,
-        )
-
     def _is_card_action_duplicate(self, token: str) -> bool:
         """Return True if this card action token was already processed within the dedup window."""
         now = time.time()
@@ -2689,58 +2663,35 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
         self._card_action_tokens[token] = now
         return False
 
-    async def _handle_card_action_event(self, data: Any) -> None:
-        """Route Feishu interactive card button clicks as synthetic COMMAND events."""
-        event = getattr(data, "event", None)
-        token = str(getattr(event, "token", "") or "")
-        if token and self._is_card_action_duplicate(token):
-            logger.debug("[Feishu] Dropping duplicate card action token: %s", token)
-            return
-        context = getattr(event, "context", None)
-        chat_id = str(getattr(context, "open_chat_id", "") or "")
-        operator = getattr(event, "operator", None)
-        open_id = str(getattr(operator, "open_id", "") or "")
-        if not chat_id or not open_id:
-            logger.debug("[Feishu] Card action missing chat_id or operator open_id, dropping")
-            return
-        action = getattr(event, "action", None)
-        action_tag = str(getattr(action, "tag", "") or "button")
-        action_value = getattr(action, "value", {}) or {}
-        synthetic_text = f"/card {action_tag}"
-        if action_value:
-            try:
-                synthetic_text += f" {json.dumps(action_value, ensure_ascii=False)}"
-            except Exception:
-                pass
-        logger.info("[Feishu] Routing card action %r from %s in %s as synthetic command", action_tag, open_id, chat_id)
-        await self._dispatch_synthetic_event(
-            text=synthetic_text, message_type=MessageType.COMMAND, chat_id=chat_id,
-            sender_id=SimpleNamespace(open_id=open_id, user_id=None, union_id=None), event_chat_type="group",
-            raw_message=data, message_id=token or str(uuid.uuid4()),
-        )
+    async def _dispatch_card_plugin_command(self, event: MessageEvent) -> bool:
+        """Run a card click's plugin command now; False leaves the click to the guarded pipeline.
 
-    async def _dispatch_synthetic_event(
-        self, *, text: str, message_type: MessageType, chat_id: str, sender_id: Any, event_chat_type: str,
-        raw_message: Any, message_id: str,
-    ) -> None:
-        """Wrap a reaction/card click as a MessageEvent and run it through the guarded pipeline."""
-        sender_profile = await self._resolve_sender_profile(sender_id, chat_id=chat_id)
-        chat_info = await self.get_chat_info(chat_id)
-        source = self.build_source(
-            chat_id=chat_id,
-            chat_name=chat_info.get("name") or chat_id or "Feishu Chat",
-            chat_type=resolve_source_chat_type(chat_info=chat_info, event_chat_type=event_chat_type),
-            user_id=sender_profile["user_id"],
-            user_name=sender_profile["user_name"],
-            thread_id=None,
-            user_id_alt=sender_profile["user_id_alt"],
-        )
-        synthetic_event = MessageEvent(
-            text=text, message_type=message_type, source=source, raw_message=raw_message,
-            message_id=message_id, channel_prompt=self._resolve_channel_prompt(chat_id),
-            timestamp=datetime.now(),
-        )
-        await self._handle_message_with_guards(synthetic_event)
+        A queued click waits for the chat's whole agent turn (or for an earlier click still in its
+        handler) and the clicker gets the busy ack. A click whose ``/card`` command a plugin
+        registered therefore skips the per-chat lock and the session guard and is dispatched inline,
+        like a bypass command. ``_hermes_plugin_command_inline`` tells the runner to run it through
+        the same admission, slash access and command hooks as an idle chat, then the plugin handler,
+        and never to queue, interrupt or start an agent turn. The reply is sent as a bypass
+        command's is. Built-in and unregistered commands keep the guarded path."""
+        command = event.get_command()
+        if not command or getattr(self, "_message_handler", None) is None:  # bare adapters have none
+            return False
+        try:
+            from hermes_cli.plugins import get_plugin_command_handler
+            if get_plugin_command_handler(command.replace("_", "-")) is None:
+                return False
+        except Exception:
+            logger.debug("[Feishu] Plugin command lookup failed for /%s", command, exc_info=True)
+            return False
+        if self._drop_unresolved(event):  # identity first, as handle_message does
+            return True
+        event._hermes_plugin_command_inline = True
+        logger.info("[Feishu] Card click /%s runs inline (plugin command, not queued)", command)
+        try:
+            await self._dispatch_inline_reply(event, log_cmd=command)
+        except Exception as exc:
+            logger.error("[Feishu] Card plugin command '/%s' failed: %s", command, exc, exc_info=True)
+        return True
 
     # --- Per-chat serialization and typing indicator ---
     def _get_chat_lock(self, chat_id: str) -> asyncio.Lock:
@@ -4210,9 +4161,11 @@ class FeishuAdapter(FeishuChoiceCardsMixin, FeishuSyntheticEventsMixin, BasePlat
             return SendResult(success=False, error=str(exc))
 
     async def _apply_native_tables(self, card_id: str, content: str, chat_id: Optional[str]) -> None:
-        """Closed card only: swap markdown tables for native ones. On failure the markdown card stays."""
+        """Closed card only: swap markdown tables for native ones and split markdown where a list ends
+        (``_markdown_card_elements``). On failure the markdown card stays."""
         data = self._build_stream_card_json(content, streaming=False, chat_id=chat_id, native_tables=True)
-        if '"tag": "table"' not in data:
+        # One markdown element (no table, no list split) is the card as streamed: nothing to swap.
+        if '"tag": "table"' not in data and len(json.loads(data)["body"]["elements"]) < 2:
             return
         if await self._update_stream_card(card_id, data):
             tables = getattr(self, "_stream_card_tables", None)

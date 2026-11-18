@@ -52,6 +52,10 @@ Commits: [`8d72901724`](https://github.com/Adonis0123/hermes-agent/commit/8d7290
   a threadable `om_` id, and the text is mirrored into the target session like `hermes send`.
 - Feishu keys in `config.yaml` may sit under `platforms.feishu` or `platforms.feishu.extra`.
 - Markdown tables in the final stream card are rendered as native CardKit tables.
+- Feishu renders a paragraph that follows a list (after a blank line) as part of the list's last item.
+  The final stream card therefore also ends its markdown element at the blank line where a list ends
+  (the next non-blank line is neither a list item nor indented continuation), and the closed card is
+  rebuilt for that split even when it has no table. Fenced code and tables are unchanged.
 - A topic follow-up that @-mentions someone other than the bot is not admitted, so the agent does not act on a message meant for a teammate. Sender names come from the chat members API.
 - A plain reply inside a topic carries `parent_id == root_id`. The quoted text the agent sees is labelled as the topic root, not as a quote, so the agent answers the latest question in the topic.
 
@@ -179,15 +183,41 @@ an `om_` message id; any other `reply_to` is dropped, so the message is posted t
 anchored on an `om_` `reply_to_message_id` / `thread_id` from the metadata, as before).
 `_card_reply_anchor` no longer passes a non-`om_` id through. Replies to `om_` ids are unchanged.
 
-A plugin card takes seconds to settle after a click (clicks queue behind the chat's turn), and the
-callback used to answer with nothing. `_on_card_action_trigger` now answers a click it forwards as a
-synthetic `/card` command with an `info` toast, `platform.feishu.card_action.received` ("Got it,
-working on it…"), seen by the clicker only. A click that could not be queued, and the approval /
-update-prompt / clarify / picker buttons, answer as before. `_card_toast` takes the toast type
-(default `warning`).
+A plugin card takes a moment to settle after a click, and the callback used to answer with nothing.
+`_on_card_action_trigger` now answers a click it forwards as a synthetic `/card` command with an
+`info` toast, `platform.feishu.card_action.received` ("Got it, working on it…"), seen by the clicker
+only. A click that could not be scheduled, and the approval / update-prompt / clarify / picker
+buttons, answer as before. `_card_toast` takes the toast type (default `warning`).
 
-**Files.** `plugins/platforms/feishu/adapter.py`, `locales/*.yaml` (the 17 bundled languages),
-`tests/gateway/test_feishu_reply_target.py`, `tests/gateway/test_feishu_approval_buttons.py`
+Plugin card clicks no longer queue. The synthetic `/card` command went through the chat's guarded
+pipeline, so while the chat had an agent turn running, or an earlier click was still in its handler,
+the click waited for that turn and the clicker got the "queued for the next turn" ack. Now, when a
+plugin registered the click's command, `_dispatch_card_plugin_command` skips the per-chat lock and the
+session guard, marks the event `_hermes_plugin_command_inline` and dispatches it inline
+(`_dispatch_inline_reply`, as a bypass command). The runner's `_handle_message` honours the mark right
+after admission (authorization, `pre_gateway_dispatch`, estop): `_hm_dispatch_inline_plugin_command`
+applies the idle path's slash access gate and command hooks, runs the plugin through
+`_hm_dispatch_quick_and_plugin_commands` (drain gate and quick commands first, plugin session context included), and returns. It never queues behind,
+interrupts or starts an agent turn, even when the handler raised. Concurrent clicks each run.
+The handler's non-empty reply is sent to the chat under the reply-anchor rule above. Duplicate tokens
+are still dropped. Built-in commands, unregistered commands, typed messages and other platforms keep
+the guarded path.
+
+Card clicks and reactions run upstream's `FeishuSyntheticEventsMixin`
+(`adapter_synthetic_events.py`), so each must pass `_admit_synthetic` (the text admission gate) before
+it is routed; the fast lane starts only after that. Older copies of `_handle_reaction_event`,
+`_handle_card_action_event` and `_dispatch_synthetic_event` in `adapter.py` used to shadow the mixin
+and skip the gate; they are gone. Their overlay deltas live in the mixin: the `card_click` fast lane,
+the sender name from the chat members API (`_resolve_sender_profile(..., chat_id=)`), and patch 2's
+reaction gates (`route_inbound_reactions`, silent acknowledgement emojis), which drop a reaction
+before admission. `tests/gateway/test_feishu_bot_admission.py` adapts upstream's inputs to these
+deltas: its fake sender lookup takes `chat_id`, its reaction helper turns routing on and uses a
+non-acknowledgement emoji.
+
+**Files.** `plugins/platforms/feishu/adapter.py`, `plugins/platforms/feishu/adapter_synthetic_events.py`,
+`gateway/run_inbound.py`, `locales/*.yaml` (the 17 bundled languages),
+`tests/gateway/test_feishu_reply_target.py`, `tests/gateway/test_feishu_approval_buttons.py`,
+`tests/gateway/test_feishu_bot_admission.py`
 
 **Config keys.** None. The toast text is the locale key above, so a user overlay
 `<home>/locales/<lang>.yaml` can reword it.
