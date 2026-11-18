@@ -29,6 +29,50 @@ class TestStreamCardNativeTables(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tags.count("table"), 5)
         self.assertEqual(tags[-1], "markdown")
 
+    def test_paragraph_after_a_list_starts_a_new_markdown_element(self):
+        """Feishu glues a paragraph that follows a list onto the last item, so the element ends there."""
+        from plugins.platforms.feishu.adapter import _markdown_card_elements
+
+        reply = "待办：\n- 请 Soap 在群里叫测试一起验\n- 合并 PR\n\n另有 10 条「未解决」\n\n**下一步**\n1. 发版"
+        self.assertEqual(
+            [e["content"] for e in _markdown_card_elements(reply)],
+            ["待办：\n- 请 Soap 在群里叫测试一起验\n- 合并 PR", "另有 10 条「未解决」\n\n**下一步**\n1. 发版"],
+        )
+
+    def test_list_continuations_and_following_lists_stay_together(self):
+        from plugins.platforms.feishu.adapter import _markdown_card_elements
+
+        lists = "- a\n  续行\n\n  第二段\n\n* b\n\n1. c\n2. d\n\n+ e"
+        self.assertEqual([e["content"] for e in _markdown_card_elements(lists)], [lists])
+        # A heading or bold line after the list is a paragraph: split; trailing blanks split nothing.
+        self.assertEqual(
+            [e["content"] for e in _markdown_card_elements("- a\n\n# 标题\n- b\n\n\n")],
+            ["- a", "# 标题\n- b"],
+        )
+        # "**bold**" and "---" are not list items, so nothing after them is cut.
+        plain = "**粗体**\n\n正文\n\n---\n\n结尾"
+        self.assertEqual([e["content"] for e in _markdown_card_elements(plain)], [plain])
+
+    def test_fenced_code_is_never_split(self):
+        from plugins.platforms.feishu.adapter import _markdown_card_elements
+
+        fenced = "```\n- a\n\nnot a paragraph\n```"
+        self.assertEqual([e["content"] for e in _markdown_card_elements(fenced)], [fenced])
+        # A fence after a list starts its own element and keeps its blank lines.
+        after_list = "- a\n\n```\nx\n\ny\n```\n\n尾"
+        self.assertEqual(
+            [e["content"] for e in _markdown_card_elements(after_list)],
+            ["- a", "```\nx\n\ny\n```\n\n尾"],
+        )
+
+    def test_list_before_a_table_keeps_table_split(self):
+        from plugins.platforms.feishu.adapter import _markdown_card_elements
+
+        reply = "- a\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n- b\n\n收尾"
+        self.assertEqual(
+            [e["tag"] for e in _markdown_card_elements(reply)], ["markdown", "table", "markdown", "markdown"],
+        )
+
     def _adapter(self):
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
@@ -67,6 +111,18 @@ class TestStreamCardNativeTables(unittest.IsolatedAsyncioTestCase):
         card = json.loads(adapter._update_stream_card.await_args.args[1])
         self.assertEqual(card["body"]["elements"][0]["element_id"], "md_body")
         self.assertEqual(adapter._stream_card_tables, {})
+
+    async def test_finalize_splits_a_list_glued_paragraph_without_a_table(self):
+        import json
+
+        adapter = self._adapter()
+        adapter._stream_card_content = AsyncMock(return_value=True)
+        await adapter._edit_stream_card(
+            card_id="c1", content="- 一项\n\n另有 10 条", finalize=True, message_id="card:c1", chat_id="oc",
+        )
+        card = json.loads(adapter._update_stream_card.await_args.args[1])
+        self.assertEqual([e["content"] for e in card["body"]["elements"]], ["- 一项", "另有 10 条"])
+        self.assertEqual(adapter._stream_card_tables, {"c1": "oc"})  # next stream write restores md_body
 
     async def test_finalize_without_table_keeps_markdown_card(self):
         adapter = self._adapter()

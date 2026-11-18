@@ -690,13 +690,15 @@ def _reaction_adapter(**kwargs):
         )
     )
     adapter._build_get_message_request = lambda _mid: object()
+    # Overlay patch 2 routes reactions only when route_inbound_reactions is on (off by default).
+    adapter._route_inbound_reactions = True
 
     async def _run_blocking(func, *args):
         return func(*args)
 
     adapter._run_blocking = _run_blocking
 
-    async def _resolve_sender_profile(user_id_obj, *, is_bot=False):
+    async def _resolve_sender_profile(user_id_obj, *, chat_id="", is_bot=False):  # chat_id: overlay patch 2
         return {"user_id": getattr(user_id_obj, "open_id", None), "user_name": "U", "user_id_alt": None}
 
     adapter._resolve_sender_profile = _resolve_sender_profile
@@ -719,7 +721,8 @@ def _reaction_data(open_id: str):
             message_id="om_bot_msg",
             operator_type="user",
             user_id=SimpleNamespace(open_id=open_id, user_id=None, union_id=None),
-            reaction_type=SimpleNamespace(emoji_type="THUMBSUP"),
+            # Not THUMBSUP: overlay patch 2 drops plain acknowledgement emojis before admission.
+            reaction_type=SimpleNamespace(emoji_type="THINKING"),
         )
     )
 
@@ -745,7 +748,7 @@ def test_group_reaction_from_allowlisted_user_is_routed(monkeypatch):
     adapter._allowed_group_users = frozenset({"ou_owner"})
     routed = _run_reaction(adapter, "ou_owner", chat_id="oc_g")
     assert len(routed) == 1
-    assert routed[0].text == "reaction:added:THUMBSUP"
+    assert routed[0].text == "reaction:added:THINKING"
 
 
 def test_group_reaction_ignores_mention_requirement(monkeypatch):
@@ -887,3 +890,19 @@ def test_synthetic_group_drop_warns_once_for_empty_default_allowlist(event_kind,
     assert len(warnings) == 1
     assert "FEISHU_ALLOWED_USERS is empty" in warnings[0]
     assert "oc_unconfigured" in warnings[0]
+
+
+def test_overlay_reaction_gates_drop_before_routing():
+    """Overlay patch 2: reactions stay off unless route_inbound_reactions is on, and acknowledgement
+    emojis are dropped even then."""
+    import asyncio
+
+    adapter = _reaction_adapter(group_policy="open")
+    adapter._route_inbound_reactions = False
+    assert _run_reaction(adapter, "ou_owner", chat_id="oc_g") == []
+    adapter._route_inbound_reactions = True
+    adapter.get_chat_info = _chat_get_info("oc_g", "group")
+    data = _reaction_data("ou_owner")
+    data.event.reaction_type.emoji_type = "THUMBSUP"
+    asyncio.run(adapter._handle_reaction_event("im.message.reaction.created_v1", data))
+    assert adapter._routed == []

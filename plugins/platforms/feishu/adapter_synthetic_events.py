@@ -56,6 +56,18 @@ class FeishuSyntheticEventsMixin:
         reaction_type_obj = getattr(event, "reaction_type", None)
         emoji_type = str(getattr(reaction_type_obj, "emoji_type", "") or "UNKNOWN")
         action = "added" if "created" in event_type else "removed"
+        # Owner overlay (patch 2): reactions are off unless route_inbound_reactions is on, and plain
+        # acknowledgement emojis never become a turn.
+        from plugins.platforms.feishu.adapter import _FEISHU_SILENT_REACTION_EMOJIS
+        if not getattr(self, "_route_inbound_reactions", False):
+            logger.info(
+                "[Feishu] Ignoring inbound reaction %s:%s on message %s (route_inbound_reactions=false)",
+                action, emoji_type, message_id,
+            )
+            return
+        if emoji_type in _FEISHU_SILENT_REACTION_EMOJIS:
+            logger.info("[Feishu] Ignoring silent reaction %s:%s on message %s", action, emoji_type, message_id)
+            return
         synthetic_text = f"reaction:{action}:{emoji_type}"
 
         # Reactions become agent turns, so they must clear the same admission gate as text
@@ -115,7 +127,7 @@ class FeishuSyntheticEventsMixin:
         await self._dispatch_synthetic_event(
             text=synthetic_text, message_type=MessageType.COMMAND, chat_id=chat_id,
             sender_id=sender_id, event_chat_type=chat_type,
-            raw_message=data, message_id=token or str(uuid.uuid4()),
+            raw_message=data, message_id=token or str(uuid.uuid4()), card_click=True,
         )
 
     async def _synthetic_chat_type(self, chat_id: str) -> str:
@@ -128,10 +140,13 @@ class FeishuSyntheticEventsMixin:
 
     async def _dispatch_synthetic_event(
         self, *, text: str, message_type: MessageType, chat_id: str, sender_id: Any, event_chat_type: str,
-        raw_message: Any, message_id: str,
+        raw_message: Any, message_id: str, card_click: bool = False,
     ) -> None:
-        """Wrap a reaction/card click as a MessageEvent and run it through the guarded pipeline."""
-        sender_profile = await self._resolve_sender_profile(sender_id)
+        """Wrap an admitted reaction/card click as a MessageEvent and run it through the guarded
+        pipeline; a card click whose command a plugin registered takes the adapter's
+        ``_dispatch_card_plugin_command`` instead (never queued behind the chat's turn)."""
+        # chat_id: the overlay names the sender from the chat members API (patch 2).
+        sender_profile = await self._resolve_sender_profile(sender_id, chat_id=chat_id)
         chat_info = await self.get_chat_info(chat_id)
         source = self.build_source(
             chat_id=chat_id,
@@ -147,6 +162,8 @@ class FeishuSyntheticEventsMixin:
             message_id=message_id, channel_prompt=self._resolve_channel_prompt(chat_id),
             timestamp=datetime.now(),
         )
+        if card_click and await self._dispatch_card_plugin_command(synthetic_event):
+            return
         await self._handle_message_with_guards(synthetic_event)
 
     def _admit_synthetic(self, user_id_obj: Any, *, chat_id: str, chat_type: str) -> Optional[RejectReason]:
