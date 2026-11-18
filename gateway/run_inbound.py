@@ -1255,6 +1255,21 @@ class GatewayInboundMixin(
             _handled, _result = await self._admit_command_turn(event, source, _quick_key, stop_epoch)
         return _handled, _result
 
+    async def _hm_dispatch_inline_plugin_command(
+        self, event: MessageEvent, source: SessionSource, _quick_key: str
+    ) -> Optional[str]:
+        """A plugin command an adapter dispatched inline (``_hermes_plugin_command_inline``: a
+        Feishu card click) runs now, whether or not this session has a turn running: the idle
+        path's slash access gate, command hooks and plugin dispatch, then return. It never queues
+        behind, interrupts or starts an agent turn, even when nothing handled it (a handler that
+        raised included)."""
+        _handled, _result, command, _canonical = await self._hm_resolve_command(event, source, _quick_key)
+        if not _handled:
+            _handled, _result, command = await self._hm_dispatch_quick_and_plugin_commands(event, source, command)
+        if not _handled:
+            logger.warning("Inline plugin command /%s was not handled; dropped without an agent turn", command)
+        return _result
+
     def _hm_rescue_orphaned_fifo(
         self, event: MessageEvent, source: SessionSource, is_internal: bool, _quick_key: str
     ) -> tuple[MessageEvent, SessionSource, bool]:
@@ -1353,6 +1368,8 @@ class GatewayInboundMixin(
         """Handle an incoming message from any platform: auth → command check → running-agent
         interrupt → get/create session → build context → run agent → return response."""
         from gateway.run import _AGENT_PENDING_SENTINEL
+        # Read before admission: a pre_gateway_dispatch hook may hand back a different event.
+        _inline_plugin_command = getattr(event, "_hermes_plugin_command_inline", False) is True
         _admitted = await self._hm_admit_event(event)
         if _admitted is None:
             return None
@@ -1374,6 +1391,8 @@ class GatewayInboundMixin(
             return _paused_notice
 
         _quick_key = self._session_key_for_source(source)
+        if _inline_plugin_command and not is_internal:
+            return await self._hm_dispatch_inline_plugin_command(event, source, _quick_key)
         _reply = None if is_internal else await self._hm_pending_reply_intercepts(event, source, _quick_key)
         if _reply is not None:
             return _reply

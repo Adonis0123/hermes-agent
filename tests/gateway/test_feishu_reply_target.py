@@ -92,3 +92,27 @@ def test_card_click_confirmation_stream_card_is_posted_to_the_chat(feishu):
     assert [(c.receive_id_type, c.request_body.receive_id, c.request_body.msg_type) for c in creates] == [
         ("chat_id", "oc_group", "interactive"),
     ]
+
+
+def test_inline_plugin_card_click_reply_is_posted_to_the_chat(feishu, monkeypatch):
+    """A plugin card click dispatched inline (busy chat or not) still delivers its reply, posted
+    to the chat rather than replying to the callback token."""
+    from hermes_cli import plugins as plugins_mod
+
+    adapter, replies, creates = feishu
+    monkeypatch.setattr(plugins_mod, "get_plugin_command_handler", lambda name: object() if name == "card" else None)
+    adapter._allowed_group_users = frozenset({"ou_user1"})
+    adapter.set_message_handler(AsyncMock(return_value="#25 已标记完成。"))
+    data = SimpleNamespace(event=SimpleNamespace(
+        token=_CARD_TOKEN, context=SimpleNamespace(open_chat_id="oc_group"),
+        operator=SimpleNamespace(open_id="ou_user1"), action=SimpleNamespace(tag="button", value={"wa": "done"}),
+    ))
+    with patch.object(adapter, "_resolve_sender_profile", AsyncMock(
+            return_value={"user_id": "ou_user1", "user_name": "Dave", "user_id_alt": None})), \
+            patch.object(adapter, "get_chat_info", AsyncMock(return_value={"name": "Group"})):
+        asyncio.run(adapter._handle_card_action_event(data))
+
+    event = adapter._message_handler.await_args.args[0]
+    assert event.message_id == _CARD_TOKEN and event._hermes_plugin_command_inline is True
+    assert replies == []
+    assert [(c.receive_id_type, c.request_body.receive_id) for c in creates] == [("chat_id", "oc_group")]
