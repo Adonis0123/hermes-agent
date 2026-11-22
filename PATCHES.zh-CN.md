@@ -17,6 +17,7 @@
 | 6 | [飞书发送者显示名覆盖](#6-飞书发送者显示名覆盖) | 飞书插件 | 可以 |
 | 7 | [飞书流式卡片标题栏可关闭](#7-飞书流式卡片标题栏可关闭) | 飞书插件 | 可以 |
 | 8 | [飞书卡片按钮点击后有提示且确认能发到群里](#8-飞书卡片按钮点击后有提示且确认能发到群里) | 飞书插件 | 可以 |
+| 9 | [关机暂存记下真实发送人，删掉无主消息](#9-关机暂存记下真实发送人删掉无主消息) | gateway 核心 | 可以 |
 
 ## 1. 跨工具轮保持同一条编辑流
 
@@ -201,6 +202,42 @@ post/text 回退两条路径都一样。现在 `_send_raw_message` 只回复 `om
 里改写。
 
 **能否提交上游？** 可以。post/text 那一半是上游 bug，toast 是通用改进；流式卡片那一半依赖补丁 2。
+
+## 9. 关机暂存记下真实发送人，删掉无主消息
+
+提交：`7c91536f90`。
+
+**作用。** 关机时 `_serialise_value` 把排队中的 `MessageEvent` 写进 `<home>/pending_messages/`。
+它原先按一张固定属性表取值（`session_id`、`platform`、`sender_id`、`sender_name`、`reply_to`、
+`media`、`raw_event`），不能转 JSON 的值一律 `str()`。`MessageEvent.sender_id` 是方法，所以文件里存的
+是 `<bound method ...>` 加整个事件的 repr；表里其他名字也都不是 `MessageEvent` 的字段。现在会调用
+`sender_id`，存它返回的 id；其余改取真实字段：`sender_name`（`user_name`）、`message_id`、
+`message_type`（取 value）、`source` 上的 `platform` 和 `chat_id`、`reply_to_message_id`、`media_urls`。
+`session_id` 照旧透传，给自带它的类事件对象用。不能转 JSON 的值直接不写，不再 `str()`。
+
+启动时 `_recover_one_payload` 把文件里的 session key 解析成会话 id。解析器回答 `None` 表示没有会话
+拥有这个 key，比如飞书卡片点击，key 形如 `agent:main:feishu:group:<chat>:<user>`，从没建过会话。
+这种文件原先会一直留着，每次启动报一条 WARNING，可是以后哪次启动都恢复不了：恢复只会补一条 user 记录。
+现在文件满 7 天后（`_UNOWNED_DISCARD_AFTER_S`；按 `ts` 算，没有就按文件 mtime），
+`_discard_unowned_payload` 打一条 WARNING，带 session key 和正文前 200 个字符，然后删文件，不计入恢复数。
+不满 7 天照旧保留文件并打原来的 WARNING，文案补了一句「仍无主的话 7 天后删除」。解析器抛错、回答
+`(session_id, None)`、没传解析器、文件读不了或格式坏了，这些情况照旧保留文件。
+
+为什么要等：上游 `resolve_session_id_for_key` 的文档写明 `None` 表示「保留暂存文件」。它在该 key 的
+profile 存储打不开、路由查询出错（`_peer_row` 只打 DEBUG）、唯一的会话行晚于暂存时间时，也回答 `None`。
+等 7 天是给这类暂时故障留恢复时间。已知限制：故障持续超过 7 天时，真实消息会被删除，日志里留正文前
+200 个字符。
+
+**文件。** `gateway/shutdown_flush.py`、`tests/gateway/test_shutdown_flush.py`
+
+**配置项。** 无。
+
+**能否提交上游？** 可以。序列化那一半是上游 bug。
+
+**何时去掉。** 上游的 `_serialise_value` 对真实 `MessageEvent` 存下字符串 `sender_id` 后，去掉序列化
+那一半；上游不再保留无主 key 的文件后，去掉恢复那一半。两半都去掉之前保留
+`test_real_message_event_stores_sender_id_string` 和 `test_recover_deletes_payload_no_session_owns`，
+之后删掉本条。
 
 ## 同步流程
 

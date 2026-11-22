@@ -16,6 +16,7 @@ This fork is [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-
 | 6 | [Feishu sender display-name overrides](#6-feishu-sender-display-name-overrides) | Feishu plugin | Yes |
 | 7 | [Optional Feishu stream card header](#7-optional-feishu-stream-card-header) | Feishu plugin | Yes |
 | 8 | [Feishu card clicks get a toast and a delivered confirmation](#8-feishu-card-clicks-get-a-toast-and-a-delivered-confirmation) | Feishu plugin | Yes |
+| 9 | [Shutdown flush keeps a real sender id and drops unowned messages](#9-shutdown-flush-keeps-a-real-sender-id-and-drops-unowned-messages) | gateway core | Yes |
 
 ## 1. Keep one edit stream across tool rounds
 
@@ -224,6 +225,48 @@ non-acknowledgement emoji.
 
 **Upstream-able?** Yes. The post/text half is an upstream bug and the toast is generic; the stream
 card half needs patch 2.
+
+## 9. Shutdown flush keeps a real sender id and drops unowned messages
+
+Commits: `7c91536f90`.
+
+**What it does.** At shutdown `_serialise_value` writes each queued `MessageEvent` to
+`<home>/pending_messages/`. It used to read a fixed list of attributes (`session_id`, `platform`,
+`sender_id`, `sender_name`, `reply_to`, `media`, `raw_event`) and `str()` any value that was not
+JSON-safe. `MessageEvent.sender_id` is a method, so the file held `<bound method ...>` followed by the
+repr of the whole event; the other names are not `MessageEvent` fields at all. Now `sender_id` is
+called and stored as the id it returns, and the payload takes real fields: `sender_name`
+(`user_name`), `message_id`, `message_type` (its value), `platform` and `chat_id` from `source`,
+`reply_to_message_id`, `media_urls`. `session_id` stays a passthrough for look-alike events that
+carry one. A value that is not JSON-safe is left out, never `str()`-ed.
+
+At startup `_recover_one_payload` resolves the file's session key to a session id. When the resolver
+answers `None` (no session owns the key, e.g. a Feishu card click whose key
+`agent:main:feishu:group:<chat>:<user>` never opened a session), the file used to be kept with a
+WARNING on every start, although no later start can recover it: replay only appends a user row.
+Once the payload is 7 days old (`_UNOWNED_DISCARD_AFTER_S`; its `ts`, else the file's mtime),
+`_discard_unowned_payload` logs one WARNING with the session key and the first 200 characters of the
+text, deletes the file, and the payload is not counted as recovered. Until then the file is kept with
+the old WARNING, which now says it will be discarded after 7 days if still unowned. A resolver that
+raised, a `(session_id, None)` answer, a call without a resolver, unreadable or malformed files keep
+the file as before.
+
+Why wait: upstream's `resolve_session_id_for_key` documents `None` as "preserve the flush file", and it
+also answers `None` when the key's profile store cannot be opened, when the routing lookup fails
+(`_peer_row` logs that at DEBUG), and when the only row started after the flush. The grace period
+lets such a transient failure clear. Known limit: if one lasts over 7 days, a real message is deleted,
+with its first 200 characters in the log.
+
+**Files.** `gateway/shutdown_flush.py`, `tests/gateway/test_shutdown_flush.py`
+
+**Config keys.** None.
+
+**Upstream-able?** Yes. The serialiser half is an upstream bug.
+
+**Dropping it.** When upstream's `_serialise_value` stores a string `sender_id` for a real
+`MessageEvent`, drop the serialiser half. When upstream stops keeping files whose key no session owns,
+drop the recovery half. Keep `test_real_message_event_stores_sender_id_string` and
+`test_recover_deletes_payload_no_session_owns` until both are gone, then remove this entry.
 
 ## Sync procedure
 
