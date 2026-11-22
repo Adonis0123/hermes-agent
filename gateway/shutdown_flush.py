@@ -209,13 +209,31 @@ def _json_safe(value: Any) -> bool:
 
 def _serialise_value(value: Any) -> Optional[dict]:
     """Convert a pending message value to a JSON-serialisable dict."""
-    if hasattr(value, "text"):  # MessageEvent-like object
+    if hasattr(value, "text"):  # MessageEvent (gateway/platforms/event.py) or a look-alike
         result: dict[str, Any] = {"text": getattr(value, "text", "")}
-        for attr in ("session_id", "platform", "sender_id", "sender_name", "reply_to", "media",
-                     "raw_event"):
-            val = getattr(value, attr, None)
-            if val is not None:
-                result[attr] = val if _json_safe(val) else str(val)
+        source = getattr(value, "source", None)
+        sender = getattr(value, "sender_id", None)
+        if callable(sender):  # a method on MessageEvent; its str() is "<bound method ...>" + event repr
+            try:
+                sender = sender()
+            except Exception:
+                sender = None
+        platform = getattr(source, "platform", None)
+        message_type = getattr(value, "message_type", None)
+        fields = {
+            # MessageEvent has no session_id; a look-alike that carries one lets recovery skip the resolver.
+            "session_id": getattr(value, "session_id", None),
+            "sender_id": sender,
+            "sender_name": getattr(value, "user_name", None) or getattr(source, "user_name", None),
+            "message_id": getattr(value, "message_id", None),
+            "message_type": getattr(message_type, "value", message_type),
+            "platform": getattr(platform, "value", platform),
+            "chat_id": getattr(source, "chat_id", None),
+            "reply_to_message_id": getattr(value, "reply_to_message_id", None),
+            "media_urls": getattr(value, "media_urls", None) or None,
+        }
+        # Drop, never str(), what is not JSON-safe: a repr of a live object is no recoverable value.
+        result.update({k: v for k, v in fields.items() if v is not None and _json_safe(v)})
         return result
     if isinstance(value, str):  # runner-level _pending_messages
         return {"text": value}
@@ -332,8 +350,9 @@ def recover_pending_spool(persistence=None, *, session_resolver=None) -> tuple[i
     (session_id, persistence) | None``, as :func:`recover_gateway_pending` builds from the session
     store) is required for real flush files: adapter ``MessageEvent`` objects carry no
     ``session_id``, so without it every recovery lands in the skip branch. A returned handle routes
-    the append to the profile store owning the key (multiplexed gateways); ``None`` preserves the
-    file. Returns ``(recovered, held_back)``: the number of
+    the append to the profile store owning the key (multiplexed gateways); a ``None`` handle
+    preserves the file, and a ``None`` answer (no session owns the key) preserves it too until it is
+    ``_UNOWNED_DISCARD_AFTER_S`` old, then logs and deletes it without counting it as recovered. Returns ``(recovered, held_back)``: the number of
     messages recovered, and the session ids whose spool files this pass held back after a failed
     replay, so the live writer can drain them before that session's next row.
     """
@@ -386,7 +405,8 @@ def recover_pending_spool(persistence=None, *, session_resolver=None) -> tuple[i
 def _recover_one_payload(persistence, path: Path, payload: dict[str, Any], *,
                          session_resolver=None, blocked_sessions: dict[str, int]) -> bool:
     """Append one flush payload through ``persistence``; False when it was not replayed (the file is
-    kept, or quarantined when the database rejected the row itself)."""
+    kept, quarantined when the database rejected the row itself, or deleted when the resolver has
+    said no session owns its key for longer than ``_UNOWNED_DISCARD_AFTER_S``)."""
     from persistence.conversation.messages import NewMessage
     # Cap-dropped transcript payloads carry the full message dict keyed by session_id: replay it
     # directly (#78182). This handles spool files that were never drained before a restart.
@@ -434,17 +454,58 @@ def _recover_one_payload(persistence, path: Path, payload: dict[str, Any], *,
             resolved = session_resolver(session_key, not_after=payload.get("ts"))
         except Exception as exc:
             logger.debug("Session key->id resolution failed for %s: %s", session_key, exc)
-            resolved = None
+            resolved = False  # a failed lookup may succeed next start: preserve below
         if resolved and resolved[1] is not None:
             session_id, target = resolved
+        elif resolved is None and _payload_age_s(payload, path) >= _UNOWNED_DISCARD_AFTER_S:
+            # No session owns this key (e.g. a Feishu card click that never opened one). Replay only
+            # appends a user row, so no later start can recover it; keeping the file just repeats
+            # the warning below on every boot. But None also covers an unreachable profile store, a
+            # failed routing lookup (logged at DEBUG) and a row newer than the flush, so delete only
+            # once the file has stayed unowned past the grace period.
+            _discard_unowned_payload(path, session_key, text)
+            return False
     if not session_id:
         logger.warning("Cannot recover pending message for %s: no session_id in flush file and "
                        "session_key-to-id resolution failed. "
-                       "The message text is preserved in %s", session_key, path)
+                       "The message text is preserved in %s; if no session owns the key, it will be "
+                       "discarded after %d days", session_key, path, _UNOWNED_DISCARD_AFTER_S // 86400)
         return False
     target.messages.append(session_id, NewMessage(role="user", content=text,
                                                   timestamp=payload.get("ts", int(time.time()))))
     return True
+
+
+_DISCARD_TEXT_CHARS = 200
+# How long a payload whose key resolves to no session is kept before it is deleted as unowned.
+_UNOWNED_DISCARD_AFTER_S = 7 * 86400
+
+
+def _payload_age_s(payload: dict[str, Any], path: Path) -> float:
+    """Seconds since the payload was flushed: its ``ts``, else the file's mtime; 0 when neither is usable."""
+    ts = payload.get("ts")
+    try:
+        ts = float(ts) if isinstance(ts, (int, float)) and not isinstance(ts, bool) else None
+    except OverflowError:  # a JSON integer too large for a float
+        ts = None
+    if ts is None or not math.isfinite(ts):
+        try:
+            ts = path.stat().st_mtime
+        except OSError:
+            return 0.0
+    return time.time() - ts
+
+
+def _discard_unowned_payload(path: Path, session_key: str, text: str) -> None:
+    """Delete a pending-message file whose session key no session owns, logging its text first."""
+    text = str(text)
+    shown = text if len(text) <= _DISCARD_TEXT_CHARS else text[:_DISCARD_TEXT_CHARS] + "…"
+    logger.warning("Discarding pending message for %s: no session owns this key, so it cannot be "
+                   "recovered. Text (%d chars): %r", session_key, len(text), shown)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("Could not delete unrecoverable pending-message file %s: %s", path, exc)
 
 
 def recover_gateway_pending(runner) -> int:

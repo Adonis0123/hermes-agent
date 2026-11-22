@@ -327,3 +327,112 @@ def test_drain_transcript_spool_skips_parseable_non_dict_payload(tmp_path, monke
     replayed = []
     assert drain_transcript_spool("sess-1", replayed.append) == (1, 0)
     assert replayed == [{"role": "user", "content": "hi"}]
+
+
+# ── Real MessageEvent payloads and unowned session keys ────────────────
+
+
+def _real_event(text: str):
+    from gateway.config import Platform
+    from gateway.platforms.event import MessageEvent
+    from gateway.session import SessionSource
+
+    return MessageEvent(
+        text=text,
+        user_id=None,
+        message_id="om_1",
+        source=SessionSource(platform=Platform.FEISHU, chat_id="oc_x", chat_type="group",
+                             user_id="ou_x", user_name="Alice"),
+    )
+
+
+@pytest.mark.parametrize("flush", ["pending", "overflow"])
+def test_real_message_event_stores_sender_id_string(tmp_path, monkeypatch, flush):
+    """``MessageEvent.sender_id`` is a method; the payload must hold the id it returns, not a
+    ``<bound method ...>`` repr carrying the whole event."""
+    flush_dir = _make_flush_dir(tmp_path)
+    monkeypatch.setattr("gateway.shutdown_flush._get_flush_dir", lambda: flush_dir)
+    key = "agent:main:feishu:group:oc_x:ou_x"
+    if flush == "pending":
+        assert flush_pending_to_file({key: _real_event("hi")}) == 1
+    else:
+        assert flush_overflow_to_file({key: [_real_event("hi")]}) == 1
+
+    (path,) = flush_dir.glob("*.json")
+    raw = path.read_text(encoding="utf-8")
+    assert "bound method" not in raw
+    data = json.loads(raw)["data"]
+    assert data == {"text": "hi", "sender_id": "ou_x", "sender_name": "Alice", "message_id": "om_1",
+                    "message_type": "text", "platform": "feishu", "chat_id": "oc_x"}
+
+
+def test_recover_deletes_payload_no_session_owns(tmp_path, monkeypatch, caplog):
+    """A key no session has owned for over 7 days (a card click that never opened one) cannot be
+    recovered on any start: log its text once, delete the file, count nothing, write nothing."""
+    import logging
+
+    flush_dir = _make_flush_dir(tmp_path)
+    monkeypatch.setattr("gateway.shutdown_flush._get_flush_dir", lambda: flush_dir)
+    key = "agent:main:feishu:group:oc_x:ou_y"
+    text = "A" * 200 + "TAIL"
+    payload = {"session_key": key, "reason": "shutdown", "ts": int(time.time()) - 8 * 86400,
+               "data": {"text": text}}
+    flush_file = flush_dir / "pending-unowned.json"
+    flush_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    store, routed = MagicMock(), MagicMock()
+    resolver = MagicMock(return_value=None)
+    with caplog.at_level(logging.WARNING, logger="gateway.shutdown_flush"):
+        assert recover_pending_to_db(store, session_resolver=resolver) == 0
+    assert not flush_file.exists()
+    store.messages.append.assert_not_called()
+    routed.messages.append.assert_not_called()
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert key in warnings[0] and "A" * 200 in warnings[0] and "TAIL" not in warnings[0]
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="gateway.shutdown_flush"):
+        assert recover_pending_to_db(store, session_resolver=resolver) == 0
+    assert not caplog.records
+
+    # Without a resolver nothing was looked up, and a resolver that raised may answer next start:
+    # both still preserve the file.
+    flush_file.write_text(json.dumps(payload), encoding="utf-8")
+    assert recover_pending_to_db(store) == 0
+    assert flush_file.exists()
+    assert recover_pending_to_db(store, session_resolver=MagicMock(side_effect=OSError("db"))) == 0
+    assert flush_file.exists()
+
+
+def test_recover_keeps_unowned_payload_within_grace_period(tmp_path, monkeypatch, caplog):
+    """A None answer can also mean an unreachable store or a failed lookup, so a payload under 7 days
+    old is kept with the usual WARNING. Without a usable ts, the file's mtime decides."""
+    import logging
+    import os
+
+    flush_dir = _make_flush_dir(tmp_path)
+    monkeypatch.setattr("gateway.shutdown_flush._get_flush_dir", lambda: flush_dir)
+    key = "agent:main:feishu:group:oc_x:ou_y"
+    flush_file = flush_dir / "pending-young.json"
+    flush_file.write_text(json.dumps({"session_key": key, "ts": int(time.time()) - 6 * 86400,
+                                      "data": {"text": "young"}}), encoding="utf-8")
+
+    store, resolver = MagicMock(), MagicMock(return_value=None)
+    with caplog.at_level(logging.WARNING, logger="gateway.shutdown_flush"):
+        assert recover_pending_to_db(store, session_resolver=resolver) == 0
+    assert flush_file.exists()
+    store.messages.append.assert_not_called()
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and key in warnings[0] and "after 7 days" in warnings[0]
+
+    # No ts: a fresh file is kept, a file whose mtime is 8 days old is deleted.
+    flush_file.write_text(json.dumps({"session_key": key, "ts": "bad", "data": {"text": "x"}}),
+                          encoding="utf-8")
+    assert recover_pending_to_db(store, session_resolver=resolver) == 0
+    assert flush_file.exists()
+    old = time.time() - 8 * 86400
+    os.utime(flush_file, (old, old))
+    assert recover_pending_to_db(store, session_resolver=resolver) == 0
+    assert not flush_file.exists()
+    store.messages.append.assert_not_called()
